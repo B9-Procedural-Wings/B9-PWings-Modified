@@ -7,6 +7,7 @@ using UnityEngine;
 using KSP.Localization;
 using UnityEngine.Internal;
 using UnityEngine.Scripting;
+using ClickThroughFix;
 
 
 namespace WingProcedural
@@ -3103,7 +3104,7 @@ namespace WingProcedural
                     UIUtility.ConfigureStyles();
                 }
 
-                UIUtility.uiRectWindowEditor = GUILayout.Window(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
+                UIUtility.uiRectWindowEditor = ClickThruBlocker.GUILayoutWindow(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
                 uiAdjustWindow = false;
 
                 // Thanks to ferram4
