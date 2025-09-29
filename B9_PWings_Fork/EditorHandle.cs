@@ -45,7 +45,7 @@ namespace WingProcedural
         /// <summary>
         /// How sensitive the mouse is
         /// </summary>
-        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSensitivity>().mouseSensitivity;
+        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().mouseSensitivity;
         void OnGUI()
         {
             if (!dragging || !HighLogic.LoadedSceneIsEditor || !WingProcedural.uiWindowActive) return;

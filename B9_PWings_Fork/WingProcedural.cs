@@ -4056,7 +4056,7 @@ namespace WingProcedural
         /// <summary>
         /// How sensitive the mouse is
         /// </summary>
-        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSensitivity>().mouseSensitivity;
+        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().mouseSensitivity;
 
         private void UpdateHandleGizmos()
         {
