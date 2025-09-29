@@ -2986,7 +2986,6 @@ namespace WingProcedural
         #region Alternative UI/input
 
         public KeyCode uiKeyCodeEdit = KeyCode.J;
-        public static bool uiWindowActive = true;
         public static float uiMouseDeltaCache = 0f;
 
         public static int uiInstanceIDTarget = 0;
@@ -2996,7 +2995,6 @@ namespace WingProcedural
         public static int uiPropertySelectionSurface = 0;
 
         public static bool uiEditMode = false;
-        public static bool uiAdjustWindow = true;
         public static bool uiEditModeTimeout = false;
         private readonly float uiEditModeTimeoutDuration = 0.25f;
         private float uiEditModeTimer = 0f;
@@ -3086,7 +3084,7 @@ namespace WingProcedural
 
         private void OnGUI()
         {
-            if (!isStarted || !HighLogic.LoadedSceneIsEditor || !uiWindowActive)
+            if (!isStarted || !HighLogic.LoadedSceneIsEditor || !HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiWindowActive)
             {
                 return;
             }
@@ -3103,8 +3101,8 @@ namespace WingProcedural
                     UIUtility.ConfigureStyles();
                 }
 
-                UIUtility.uiRectWindowEditor = GUILayout.Window(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
-                uiAdjustWindow = false;
+                UIUtility.uiRectWindowEditor = GUILayout.Window(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
+                HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = false;
 
                 // Thanks to ferram4
                 // Following section lock the editor, preventing window clickthrough
@@ -3161,7 +3159,7 @@ namespace WingProcedural
                 if (GUILayout.Button(Localizer.Format("#autoLOC_B9_Aerospace_WingStuff_1000004"), UIUtility.uiStyleButton, GUILayout.MaxWidth(50f)))		// #autoLOC_B9_Aerospace_WingStuff_1000004 = Close
                 {
                     EditorLogic.fetch.Unlock("WingProceduralWindow");
-                    uiWindowActive = false;
+                    HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiWindowActive = false;
                     returnEarly = true;
                 }
 
@@ -3392,8 +3390,8 @@ namespace WingProcedural
                     GUILayout.Label(Localizer.Format("#autoLOC_B9_Aerospace_WingStuff_1000073"), UIUtility.uiStyleLabelHint);		// #autoLOC_B9_Aerospace_WingStuff_1000073 = Press J while pointing at a\nprocedural part to edit it
                     if (GUILayout.Button(Localizer.Format("#autoLOC_B9_Aerospace_WingStuff_1000155"), UIUtility.uiStyleButton, GUILayout.MaxWidth(50f)))		// #autoLOC_B9_Aerospace_WingStuff_1000155 = Close
                     {
-                        uiWindowActive = false;
-                        uiAdjustWindow = true;
+                        HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiWindowActive = false;
+                        HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = true;
                         EditorLogic.fetch.Unlock("WingProceduralWindow");
                     }
                     GUILayout.EndHorizontal();
@@ -3588,7 +3586,7 @@ namespace WingProcedural
                     DebugLogWithID("DrawFieldGroupHeader", "Header of " + header + " pressed | Group state: " + fieldGroupBoolStatic);
                 }
 
-                uiAdjustWindow = true;
+                HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = true;
             }
             if (fieldGroupBoolStatic)
             {
@@ -3768,8 +3766,8 @@ namespace WingProcedural
                     uiInstanceIDTarget = part.GetInstanceID();
                     uiEditMode = true;
                     uiEditModeTimeout = true;
-                    uiAdjustWindow = true;
-                    uiWindowActive = true;
+                    HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = true;
+                    HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiWindowActive = true;
                     InheritanceStatusUpdate();
                 }
             }
@@ -4012,7 +4010,7 @@ namespace WingProcedural
 
         private void StopWindowTimeout()
         {
-            uiAdjustWindow = true;
+            HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = true;
             uiEditModeTimeout = false;
             uiEditModeTimer = 0.0f;
         }
@@ -4021,7 +4019,7 @@ namespace WingProcedural
         {
             uiEditMode = false;
             uiEditModeTimeout = true;
-            uiAdjustWindow = true;
+            HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiAdjustWindow = true;
         }
 
         private string GetWindowTitle()
