@@ -60,7 +60,7 @@ namespace WingProcedural
 
     public class WPSensitivity : GameParameters.CustomParameterNode
     {
-        public override string Title { get { return "General Settings"; } }
+        public override string Title { get { return "Controls"; } }
         public override GameParameters.GameMode GameMode { get { return GameParameters.GameMode.ANY; } }
         public override string Section { get { return "B9 Procedural Wings"; } }
         public override string DisplaySection { get { return "B9 Procedural Wings"; } }
