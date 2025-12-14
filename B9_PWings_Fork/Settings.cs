@@ -76,5 +76,10 @@ namespace WingProcedural
         public double mouseSensitivity = 4.0f;
 
 
+        [GameParameters.CustomParameterUI("Enable UI Window")]
+        public bool uiWindowActive = true;
+
+        [GameParameters.CustomParameterUI("Enable Window Adjusting")]
+        public bool uiAdjustWindow = true;
     }
 }
