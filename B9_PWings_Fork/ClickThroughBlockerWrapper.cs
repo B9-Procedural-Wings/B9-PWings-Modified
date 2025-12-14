@@ -76,7 +76,6 @@ internal static class ClickThruBlockerProxy
             return r;
 
         // Fallback to stock GUILayout.Window
-        Debug.Log("GUILayoutWindowFallback");
         var fallback = GUILayout.Window(id, rect, func, title, style, options ?? Array.Empty<GUILayoutOption>());
         rect = fallback;
         return fallback;
