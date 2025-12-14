@@ -3103,7 +3103,16 @@ namespace WingProcedural
                     UIUtility.ConfigureStyles();
                 }
 
-                UIUtility.uiRectWindowEditor = GUILayout.Window(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
+                // UIUtility.uiRectWindowEditor = GUILayout.Window(GetInstanceID(), UIUtility.uiRectWindowEditor, OnWindow, GetWindowTitle(), UIUtility.uiStyleWindow, GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
+                UIUtility.uiRectWindowEditor =
+                    ClickThruBlockerProxy.GUILayoutWindowOrFallback(
+                        GetInstanceID(),
+                        ref UIUtility.uiRectWindowEditor,
+                        OnWindow,
+                        GetWindowTitle(),
+                        UIUtility.uiStyleWindow,
+                        GUILayout.Height(uiAdjustWindow ? 0 : UIUtility.uiRectWindowEditor.height));
+
                 uiAdjustWindow = false;
 
                 // Thanks to ferram4

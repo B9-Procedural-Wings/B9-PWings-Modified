@@ -56,15 +56,14 @@
       <DesignTime>True</DesignTime>
       <DependentUpon>AssemblyVersion.tt</DependentUpon>
     </Compile>
+    <Compile Include="ClickThroughBlockerWrapper.cs" />
     <Compile Include="CtrlSrfWingSynchronizer.cs" />
     <Compile Include="EditorHandle.cs" />
     <Compile Include="InstallChecker.cs" />
     <Compile Include="StaticWingGlobals.cs" />
     <Compile Include="UIUtility.cs" />
     <Compile Include="UtilityTexture.cs" />
-
     <Compile Include="WingDefaults.cs" />
-
     <Compile Include="WingProcedural.cs" />
     <Compile Include="Settings.cs" />
     <Compile Include="WingTankConfiguration.cs" />
