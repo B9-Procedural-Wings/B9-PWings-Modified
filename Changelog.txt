@@ -99,3 +99,8 @@ ChangeLog
 	Added back missing test craft (Pwings Test Aircraft, two versions)
 		Note:   1. There are two crafts, one for FAR and one without.
 				2. If you don't have FAR installed, install the non-FAR version
+
+0.46.0.1
+	Thanks to forum user @Tashkent for this:
+		Added 6 localization tags
+		Fully localized the chinese localization
