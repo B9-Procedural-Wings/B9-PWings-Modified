@@ -45,10 +45,10 @@ namespace WingProcedural
         /// <summary>
         /// How sensitive the mouse is
         /// </summary>
-        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSensitivity>().mouseSensitivity;
+        float MouseSensitivity => (float)HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().mouseSensitivity;
         void OnGUI()
         {
-            if (!dragging || !HighLogic.LoadedSceneIsEditor || !WingProcedural.uiWindowActive) return;
+            if (!dragging || !HighLogic.LoadedSceneIsEditor || !HighLogic.CurrentGame.Parameters.CustomParams<WPSettings>().uiWindowActive) return;
             if (axisLockState == 0)
             {
                 LineDrawer.Instance.enabled = false;

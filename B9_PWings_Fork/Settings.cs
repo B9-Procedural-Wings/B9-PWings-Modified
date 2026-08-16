@@ -58,7 +58,7 @@ namespace WingProcedural
 
 
 
-    public class WPSensitivity : GameParameters.CustomParameterNode
+    public class WPSettings : GameParameters.CustomParameterNode
     {
         public override string Title { get { return "Controls"; } }
         public override GameParameters.GameMode GameMode { get { return GameParameters.GameMode.ANY; } }
@@ -76,5 +76,10 @@ namespace WingProcedural
         public double mouseSensitivity = 4.0f;
 
 
+        [GameParameters.CustomParameterUI("Enable UI Window")]
+        public bool uiWindowActive = true;
+
+        [GameParameters.CustomParameterUI("Enable Window Adjusting")]
+        public bool uiAdjustWindow = true;
     }
 }
