@@ -877,6 +877,10 @@ namespace WingProcedural
             p.transform.position = pos;
             p.transform.rotation = rot;
             p.transform.SetParent(parentWing.transform, true);
+            // The gizmos treat these as the part's home (reset snaps to them) and they
+            // persist in the craft; attachPart sets them from the local pose.
+            p.attPos0 = p.transform.localPosition;
+            p.attRotation0 = p.transform.localRotation;
 
             // Link the tree exactly once. Calling both setParent AND addChild adds the
             // child to parent.children twice -> the part appears twice in the vessel
@@ -1076,14 +1080,18 @@ namespace WingProcedural
         /// </summary>
         private void SplitTrailingEdgeIntoControlSurface()
         {
-            if (isCtrlSrf || !isAttached)
+            // Not on an all-moving wing: its cfg forbids surface children, and in flight
+            // the whole part rotates through anything hinged to it.
+            if (isCtrlSrf || isWingAsCtrlSrf || !isAttached)
                 return;
 
-            // Capture the trailing-edge shape being moved out onto the surface.
+            // Capture the trailing-edge shape being moved out onto the surface. Type 1 is
+            // "No edge": a flat cap with no extent, whatever width value is still stored,
+            // so there is nothing to split off.
             float teType = sharedEdgeTypeTrailing;
             float teRoot = sharedEdgeWidthTrailingRoot;
             float teTip = sharedEdgeWidthTrailingTip;
-            if (teRoot <= 0f && teTip <= 0f)
+            if (Mathf.RoundToInt(teType) <= 1 || (teRoot <= 0f && teTip <= 0f))
                 return;
 
             if (EditorLogic.fetch == null)
@@ -1190,8 +1198,10 @@ namespace WingProcedural
                     ZeroTrailingEdge(sym);
             }
 
+            // Push an undo step, as the editor does after its own attach; this also fires
+            // onEditorShipModified. Firing the event alone left the split off the undo stack.
             if (EditorLogic.fetch != null)
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EditorLogic.fetch.SetBackup();
         }
 
         private static void ZeroTrailingEdge(WingProcedural wing)
@@ -1475,8 +1485,9 @@ namespace WingProcedural
             ShowCrossSection(station, cutNormal, cam.transform.position);
 
             // Commit on a full left-click (release), so the same event doesn't also
-            // place the part SpawnPart puts on the cursor.
-            if (Input.GetMouseButtonUp(0))
+            // place the part SpawnPart puts on the cursor. A click on the mod's own window
+            // (e.g. the cancel toggle) is for the window - raw Input sees it regardless.
+            if (Input.GetMouseButtonUp(0) && !(uiWindowActive && UIUtility.uiRectWindowEditor.Contains(UIUtility.GetMousePos())))
             {
                 Debug.Log("[B9PW] Bisect at f=" + f.ToString("F3"));
                 BisectAt(f);
@@ -1669,7 +1680,7 @@ namespace WingProcedural
             }
 
             if (EditorLogic.fetch != null)
-                GameEvents.onEditorShipModified.Fire(EditorLogic.fetch.ship);
+                EditorLogic.fetch.SetBackup();
         }
 
         private static void CropInboard(WingProcedural cs, float f, float L, float cutWidth, float cutTipOffset, float cutThk, float cutEdge)
@@ -1690,6 +1701,7 @@ namespace WingProcedural
 
             if (haveRoot && cs.SpanEndpoints(out Vector3 rootAfter, out Vector3 tipAfter))
                 cs.part.transform.position += rootBefore - rootAfter;
+                cs.part.attPos0 = cs.part.transform.localPosition;
         }
 
         // Chosen so the outline reads as a bold line without hiding the profile. World
@@ -1959,6 +1971,11 @@ namespace WingProcedural
         {
             GameEvents.onGameSceneLoadRequested.Remove(OnSceneSwitch);
             GameEvents.onEditorPartEvent.Remove(OnEditorPartEvent);
+            // Undo, New/Load or deleting the part can destroy this instance with the
+            // bisect pick/place lock still held (or the post-commit countdown armed), and
+            // nothing else ever releases it - the editor would stay unable to pick parts.
+            if (bisectMode || bisectUnlockFrames > 0)
+                ExitBisectMode();
         }
 
         public void CalcBase(int fieldID) //Calculate Geometry from angle ,originally by Rynco Lee modified by tetraflon, higher precision is required for angle calculations thus use Math double
@@ -2193,6 +2210,11 @@ namespace WingProcedural
             isAttached = true;
             UpdateGeometry(true);
             SetupMirroredCntrlSrf();
+
+            // Whatever this control was following before, it now sits where the user just
+            // put it; the next follow pass captures that instead of applying old fractions.
+            fpInit = false;
+            fpApplied = false;
 
             if (HighLogic.CurrentGame.Parameters.CustomParams<WPDebug>().logEvents)
             {
@@ -3091,6 +3113,12 @@ namespace WingProcedural
 
         private void SetupMeshFilters()
         {
+            // Called on every RefreshGeometry; without this the lists grow by a full set
+            // per call (readers that index [0, count) never noticed, but anything that
+            // walks the whole list did).
+            meshFiltersWingEdgeTrailing.Clear();
+            meshFiltersWingEdgeLeading.Clear();
+            meshFiltersCtrlEdge.Clear();
             if (!isCtrlSrf)
             {
                 meshFilterWingSurface = CheckMeshFilter(meshFilterWingSurface, "surface");
@@ -4384,7 +4412,7 @@ namespace WingProcedural
                     }
                 }
 
-                if (!isCtrlSrf && isAttached)
+                if (!isCtrlSrf && !isWingAsCtrlSrf && isAttached)
                 {
                     if (GUILayout.Button("Split trailing edge into control surface", UIUtility.uiStyleButton))
                     {
