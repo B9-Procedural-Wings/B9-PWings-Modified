@@ -1037,11 +1037,18 @@ namespace WingProcedural
         // the trailing edge, Z = 0 (thickness, flush).
         private Vector3 TrailingEdgeMidspanWorld()
         {
-            float rootTZ = sharedBaseWidthRoot * 0.5f - sharedBaseOffsetRoot;
-            float tipTZ = sharedBaseWidthTip * 0.5f + sharedBaseOffsetTip;
+            return TrailingEdgeMidspanWorld(this, part.transform);
+        }
+
+        // Geometry and pose taken separately, so a symmetry counterpart can place itself
+        // on its own wing using the fields of the wing the follow reads from.
+        private static Vector3 TrailingEdgeMidspanWorld(WingProcedural geo, Transform t)
+        {
+            float rootTZ = geo.sharedBaseWidthRoot * 0.5f - geo.sharedBaseOffsetRoot;
+            float tipTZ = geo.sharedBaseWidthTip * 0.5f + geo.sharedBaseOffsetTip;
             float midTZ = (rootTZ + tipTZ) * 0.5f;
-            Vector3 local = new Vector3(sharedBaseLength * 0.5f, -midTZ, 0f);
-            return part.transform.position + part.transform.rotation * local;
+            Vector3 local = new Vector3(geo.sharedBaseLength * 0.5f, -midTZ, 0f);
+            return t.position + t.rotation * local;
         }
 
         // Rotation for a control surface attached to a wing's trailing edge: the wing's
@@ -1244,15 +1251,16 @@ namespace WingProcedural
             WingProcedural wing = FirstOfTypeOrDefault<WingProcedural>(part.parent.Modules);
             if (wing == null || wing.isCtrlSrf)
                 return;
+            WingProcedural geo = FollowGeometrySource(wing);
 
             bool changed =
-                wing.sharedBaseLength != fpLen
-                || wing.sharedBaseWidthRoot != fpWR || wing.sharedBaseWidthTip != fpWT
-                || wing.sharedBaseOffsetRoot != fpOR || wing.sharedBaseOffsetTip != fpOT;
+                geo.sharedBaseLength != fpLen
+                || geo.sharedBaseWidthRoot != fpWR || geo.sharedBaseWidthTip != fpWT
+                || geo.sharedBaseOffsetRoot != fpOR || geo.sharedBaseOffsetTip != fpOT;
 
-            fpLen = wing.sharedBaseLength;
-            fpWR = wing.sharedBaseWidthRoot; fpWT = wing.sharedBaseWidthTip;
-            fpOR = wing.sharedBaseOffsetRoot; fpOT = wing.sharedBaseOffsetTip;
+            fpLen = geo.sharedBaseLength;
+            fpWR = geo.sharedBaseWidthRoot; fpWT = geo.sharedBaseWidthTip;
+            fpOR = geo.sharedBaseOffsetRoot; fpOT = geo.sharedBaseOffsetTip;
 
             // While the wing is untouched, re-read where this control sits on the edge if
             // the user has moved or resized it by hand, so that redefines what gets
@@ -1264,13 +1272,34 @@ namespace WingProcedural
                 fpInit = true;
                 if (!fpApplied || ControlEditedSinceApplied())
                 {
-                    CaptureSpanFractions(wing);
-                    RecordApplied();
+                    if (CaptureSpanFractions(wing, geo))
+                        RecordApplied();
                 }
                 return;
             }
 
-            ApplyFollow(wing);
+            ApplyFollow(wing, geo);
+        }
+
+        // The wing module whose fields the follow reads: the lowest instance ID across the
+        // wing and its symmetry counterparts. Mirrored wings sync their fields through
+        // UpdateCounterparts a frame apart, so two mirrored controls each reading their
+        // own wing computed slightly different lengths mid-drag; the controls then synced
+        // THOSE through their own UpdateCounterparts, each side took the other's value as
+        // a hand edit and re-captured its fraction against its own edge length, and the
+        // fraction ratcheted down a little per drag step. Reading one wing makes both
+        // sides' fields bit-identical, so the sync is a no-op. Pose still comes from each
+        // control's own wing transform.
+        private WingProcedural FollowGeometrySource(WingProcedural wing)
+        {
+            WingProcedural geo = wing;
+            foreach (Part p in wing.part.symmetryCounterparts)
+            {
+                WingProcedural c = FirstOfTypeOrDefault<WingProcedural>(p.Modules);
+                if (c != null && c.GetInstanceID() < geo.GetInstanceID())
+                    geo = c;
+            }
+            return geo;
         }
 
         private bool ControlEditedSinceApplied()
@@ -1295,25 +1324,29 @@ namespace WingProcedural
         // Z = thickness. That's the convention the gizmo drag code and
         // TrailingEdgeMidspanWorld use - NOT the mesh builder's frame (which is
         // X=thickness, Y=chord, Z=span; the mesh child is rotated relative to the part).
-        private void TrailingEdgeFrame(WingProcedural wing, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float dTZ)
+        private void TrailingEdgeFrame(WingProcedural wing, WingProcedural geo, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float dTZ)
         {
-            float rootTZ = wing.sharedBaseWidthRoot * 0.5f - wing.sharedBaseOffsetRoot;
-            float tipTZ = wing.sharedBaseWidthTip * 0.5f + wing.sharedBaseOffsetTip;
+            float rootTZ = geo.sharedBaseWidthRoot * 0.5f - geo.sharedBaseOffsetRoot;
+            float tipTZ = geo.sharedBaseWidthTip * 0.5f + geo.sharedBaseOffsetTip;
             dTZ = rootTZ - tipTZ;
-            teDirLocal = new Vector3(wing.sharedBaseLength, dTZ, 0f).normalized;
-            teMid = wing.TrailingEdgeMidspanWorld();
-            teLen = Mathf.Sqrt(wing.sharedBaseLength * wing.sharedBaseLength + dTZ * dTZ);
+            teDirLocal = new Vector3(geo.sharedBaseLength, dTZ, 0f).normalized;
+            teMid = TrailingEdgeMidspanWorld(geo, wing.part.transform);
+            teLen = Mathf.Sqrt(geo.sharedBaseLength * geo.sharedBaseLength + dTZ * dTZ);
         }
 
-        private void CaptureSpanFractions(WingProcedural wing)
+        // False when the wing has no span: its "trailing edge" is then just the chordwise
+        // stub between root and tip offsets, and fractions taken against that are
+        // meaningless. The caller keeps the previous capture and tries again later.
+        private bool CaptureSpanFractions(WingProcedural wing, WingProcedural geo)
         {
-            TrailingEdgeFrame(wing, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float _);
-            if (teLen < 1e-4f)
-                return;
+            TrailingEdgeFrame(wing, geo, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float _);
+            if (geo.sharedBaseLength < 1e-4f || teLen < 1e-4f)
+                return false;
             Vector3 teDir = wing.part.transform.TransformDirection(teDirLocal);
             fpLengthFrac = sharedBaseLength / teLen;
             fpCentreFrac = Vector3.Dot(part.transform.position - teMid, teDir) / teLen;
             fpRelRot = Quaternion.Inverse(TrailingEdgeFrameWorld(wing, teDirLocal)) * part.transform.rotation;
+            return true;
         }
 
         // Orthonormal frame sitting on the wing's trailing edge: forward = along the edge,
@@ -1324,10 +1357,10 @@ namespace WingProcedural
             return wing.part.transform.rotation * Quaternion.LookRotation(teDirLocal, Vector3.forward);
         }
 
-        private void ApplyFollow(WingProcedural wing)
+        private void ApplyFollow(WingProcedural wing, WingProcedural geo)
         {
-            TrailingEdgeFrame(wing, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float dTZ);
-            if (wing.sharedBaseLength < 1e-4f || teLen < 1e-4f)
+            TrailingEdgeFrame(wing, geo, out Vector3 teMid, out Vector3 teDirLocal, out float teLen, out float dTZ);
+            if (geo.sharedBaseLength < 1e-4f || teLen < 1e-4f)
                 return;
             Vector3 teDir = wing.part.transform.TransformDirection(teDirLocal);
 
@@ -1345,7 +1378,7 @@ namespace WingProcedural
             sharedBaseLength = fpLengthFrac * teLen;
             // Shear = -tan(TE sweep), held at the mesh's limit beyond it. The target is
             // recomputed from the wing every pass, so nothing is lost while it's pinned.
-            sharedBaseOffsetRoot = ClampCtrlSrfOffset(-dTZ / wing.sharedBaseLength);
+            sharedBaseOffsetRoot = ClampCtrlSrfOffset(-dTZ / geo.sharedBaseLength);
             sharedBaseOffsetTip = sharedBaseOffsetRoot;
 
             // The editor's gizmos treat attPos0/attRotation0 as the part's home (reset
