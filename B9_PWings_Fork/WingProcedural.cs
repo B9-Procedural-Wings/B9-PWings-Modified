@@ -1111,7 +1111,7 @@ namespace WingProcedural
             // spawn a broken control. Fall back to neutral values (no rake offset, no te scale).
             bool splitDegenerate = sharedBaseLength < 1e-4f || splitTELength < 1e-4f;
             float splitTanSweep = splitDegenerate ? 0f : splitDeltaTZ / sharedBaseLength;   // = tan(TE sweep)
-            float splitCtrlOffset = -splitTanSweep;
+            float splitCtrlOffset = ClampCtrlSrfOffset(-splitTanSweep);   // held at the mesh's limit past ~56 deg
             // The raked control measures te-width perpendicular to the TE-aligned span,
             // while the wing measures it perpendicular to the wing span; the two differ by
             // the sweep angle, so controlTe = wingTe * cos(sweep) = wingTe * length/TElength.
@@ -1215,6 +1215,25 @@ namespace WingProcedural
         // this to the rebuilt frame tracks sweep without ever re-orienting the control
         // itself - so a control keeps whichever way round it already sits.
         private Quaternion fpRelRot = Quaternion.identity;
+        // What follow last wrote to this control (fields + local pose). A wing-idle frame
+        // re-captures the fractions only when the control has moved off this - i.e. the
+        // user edited it - never from follow's own output. So a wing dragged past the
+        // shear limit and back restores exactly: nothing built while out of range can
+        // become the new definition of where the control belongs.
+        private bool fpApplied = false;
+        private float fpAppliedLen, fpAppliedOffR, fpAppliedOffT;
+        private Vector3 fpAppliedLocalPos;
+        private Quaternion fpAppliedLocalRot;
+
+        // Shear the control-surface mesh will actually build. UpdateGeometry clamps the
+        // offset to this range - and clamps root and tip slightly differently - so a value
+        // written inside it keeps both ends identical and the built shape equal to the
+        // requested one. Past it (|tan sweep| > 1.5, ~56 deg) the control's end edges can
+        // no longer be parallel to the wing's chord; they stay at the limit instead.
+        private static float ClampCtrlSrfOffset(float offset)
+        {
+            return Mathf.Clamp(offset, sharedBaseOffsetLimits.z, sharedBaseOffsetLimits.w);
+        }
 
         private void FollowParentWing()
         {
@@ -1235,17 +1254,40 @@ namespace WingProcedural
             fpWR = wing.sharedBaseWidthRoot; fpWT = wing.sharedBaseWidthTip;
             fpOR = wing.sharedBaseOffsetRoot; fpOT = wing.sharedBaseOffsetTip;
 
-            // While the wing is untouched, keep re-reading where this control sits on the
-            // edge, so moving/resizing it by hand redefines what gets preserved. The first
-            // pass lands here too, so loading a craft never reshapes anything.
+            // While the wing is untouched, re-read where this control sits on the edge if
+            // the user has moved or resized it by hand, so that redefines what gets
+            // preserved. The first pass lands here too, so loading a craft never reshapes
+            // anything. Frames where nothing about the control changed keep the last
+            // capture - see fpApplied.
             if (!fpInit || !changed)
             {
                 fpInit = true;
-                CaptureSpanFractions(wing);
+                if (!fpApplied || ControlEditedSinceApplied())
+                {
+                    CaptureSpanFractions(wing);
+                    RecordApplied();
+                }
                 return;
             }
 
             ApplyFollow(wing);
+        }
+
+        private bool ControlEditedSinceApplied()
+        {
+            return sharedBaseLength != fpAppliedLen
+                || sharedBaseOffsetRoot != fpAppliedOffR || sharedBaseOffsetTip != fpAppliedOffT
+                || part.transform.localPosition != fpAppliedLocalPos
+                || part.transform.localRotation != fpAppliedLocalRot;
+        }
+
+        private void RecordApplied()
+        {
+            fpApplied = true;
+            fpAppliedLen = sharedBaseLength;
+            fpAppliedOffR = sharedBaseOffsetRoot; fpAppliedOffT = sharedBaseOffsetTip;
+            fpAppliedLocalPos = part.transform.localPosition;
+            fpAppliedLocalRot = part.transform.localRotation;
         }
 
         // Trailing-edge frame of the wing, in the wing's PART transform space:
@@ -1301,8 +1343,18 @@ namespace WingProcedural
             // station along it. Thickness / te-width are its own shape - left alone.
             part.transform.position = teMid + teDir * (fpCentreFrac * teLen);
             sharedBaseLength = fpLengthFrac * teLen;
-            sharedBaseOffsetRoot = -dTZ / wing.sharedBaseLength;
+            // Shear = -tan(TE sweep), held at the mesh's limit beyond it. The target is
+            // recomputed from the wing every pass, so nothing is lost while it's pinned.
+            sharedBaseOffsetRoot = ClampCtrlSrfOffset(-dTZ / wing.sharedBaseLength);
             sharedBaseOffsetTip = sharedBaseOffsetRoot;
+
+            // The editor's gizmos treat attPos0/attRotation0 as the part's home (reset
+            // snaps back to them), and attachPart sets them from the local pose. Keep
+            // them current, or a reset returns the control to wherever the split left it.
+            part.attPos0 = part.transform.localPosition;
+            part.attRotation0 = part.transform.localRotation;
+
+            RecordApplied();
 
             // Field changes are picked up by CheckAllFieldValues later this frame, which
             // fires UpdateGeometry; no explicit call needed here.
