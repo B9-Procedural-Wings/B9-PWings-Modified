@@ -1254,13 +1254,18 @@ namespace WingProcedural
         #region Follow parent wing
 
         // Keeps an attached control surface tracking its parent wing's span/sweep/position
-        // (editor only) while keeping its own shape (trailing-edge width + edge type). The
+        // and thickness (editor only) while keeping its own shape (trailing-edge width +
+        // edge type). The
         // wing->control mapping is the same one the split derives: length = swept-TE length,
         // offset = -tan(sweep), pose = trailing-edge midspan + sweep tilt. te-width is NOT
         // re-derived - the split zeroed the wing's te, so the wing no longer carries it, and
         // keeping the control's te is the "keep shape" behaviour.
         private bool fpInit = false;
-        private float fpLen, fpWR, fpWT, fpOR, fpOT;
+        private float fpLen, fpWR, fpWT, fpOR, fpOT, fpTR, fpTT;
+        // Each end's thickness as a FRACTION of the wing's thickness at that span station
+        // (root end nearer the wing root). A freshly split control has 1 at both ends and
+        // simply tracks the wing; one the user thinned keeps its ratio.
+        private float fpThickRootFrac = 1f, fpThickTipFrac = 1f;
         // The control's span as FRACTIONS of the wing's trailing edge: how long it is
         // (lengthFrac) and where its centre sits relative to TE midspan (centreFrac, in
         // -0.5..+0.5 along the TE). Preserving these is what keeps a flaps/aileron setup
@@ -1276,7 +1281,7 @@ namespace WingProcedural
         // shear limit and back restores exactly: nothing built while out of range can
         // become the new definition of where the control belongs.
         private bool fpApplied = false;
-        private float fpAppliedLen, fpAppliedOffR, fpAppliedOffT;
+        private float fpAppliedLen, fpAppliedOffR, fpAppliedOffT, fpAppliedThkR, fpAppliedThkT;
         private Vector3 fpAppliedLocalPos;
         private Quaternion fpAppliedLocalRot;
 
@@ -1304,11 +1309,13 @@ namespace WingProcedural
             bool changed =
                 geo.sharedBaseLength != fpLen
                 || geo.sharedBaseWidthRoot != fpWR || geo.sharedBaseWidthTip != fpWT
-                || geo.sharedBaseOffsetRoot != fpOR || geo.sharedBaseOffsetTip != fpOT;
+                || geo.sharedBaseOffsetRoot != fpOR || geo.sharedBaseOffsetTip != fpOT
+                || geo.sharedBaseThicknessRoot != fpTR || geo.sharedBaseThicknessTip != fpTT;
 
             fpLen = geo.sharedBaseLength;
             fpWR = geo.sharedBaseWidthRoot; fpWT = geo.sharedBaseWidthTip;
             fpOR = geo.sharedBaseOffsetRoot; fpOT = geo.sharedBaseOffsetTip;
+            fpTR = geo.sharedBaseThicknessRoot; fpTT = geo.sharedBaseThicknessTip;
 
             // While the wing is untouched, re-read where this control sits on the edge if
             // the user has moved or resized it by hand, so that redefines what gets
@@ -1354,6 +1361,7 @@ namespace WingProcedural
         {
             return sharedBaseLength != fpAppliedLen
                 || sharedBaseOffsetRoot != fpAppliedOffR || sharedBaseOffsetTip != fpAppliedOffT
+                || sharedBaseThicknessRoot != fpAppliedThkR || sharedBaseThicknessTip != fpAppliedThkT
                 || part.transform.localPosition != fpAppliedLocalPos
                 || part.transform.localRotation != fpAppliedLocalRot;
         }
@@ -1363,8 +1371,22 @@ namespace WingProcedural
             fpApplied = true;
             fpAppliedLen = sharedBaseLength;
             fpAppliedOffR = sharedBaseOffsetRoot; fpAppliedOffT = sharedBaseOffsetTip;
+            fpAppliedThkR = sharedBaseThicknessRoot; fpAppliedThkT = sharedBaseThicknessTip;
             fpAppliedLocalPos = part.transform.localPosition;
             fpAppliedLocalRot = part.transform.localRotation;
+        }
+
+        // Wing thickness at the span stations of this control's two ends. Stations run
+        // 0 (wing root) to 1 (tip); the control's centre sits at 0.5 + centreFrac and its
+        // ends lengthFrac/2 either side. Its root field maps to the end nearer the wing
+        // root on both sides of the symmetry plane (the mesh's isMirrored swap and the
+        // pose convention cancel), which is also how the split assigns them.
+        private void WingThicknessAtEnds(WingProcedural geo, out float atRoot, out float atTip)
+        {
+            float sRoot = Mathf.Clamp01(0.5f + fpCentreFrac - fpLengthFrac * 0.5f);
+            float sTip = Mathf.Clamp01(0.5f + fpCentreFrac + fpLengthFrac * 0.5f);
+            atRoot = Mathf.Lerp(geo.sharedBaseThicknessRoot, geo.sharedBaseThicknessTip, sRoot);
+            atTip = Mathf.Lerp(geo.sharedBaseThicknessRoot, geo.sharedBaseThicknessTip, sTip);
         }
 
         // Trailing-edge frame of the wing, in the wing's PART transform space:
@@ -1394,6 +1416,9 @@ namespace WingProcedural
             fpLengthFrac = sharedBaseLength / teLen;
             fpCentreFrac = Vector3.Dot(part.transform.position - teMid, teDir) / teLen;
             fpRelRot = Quaternion.Inverse(TrailingEdgeFrameWorld(wing, teDirLocal)) * part.transform.rotation;
+            WingThicknessAtEnds(geo, out float wtRoot, out float wtTip);
+            fpThickRootFrac = wtRoot > 1e-4f ? sharedBaseThicknessRoot / wtRoot : 1f;
+            fpThickTipFrac = wtTip > 1e-4f ? sharedBaseThicknessTip / wtTip : 1f;
             return true;
         }
 
@@ -1421,13 +1446,17 @@ namespace WingProcedural
             part.transform.rotation = TrailingEdgeFrameWorld(wing, teDirLocal) * fpRelRot;
 
             // Keep this control's slice of the edge: same fraction of the length, same
-            // station along it. Thickness / te-width are its own shape - left alone.
+            // station along it. te-width is its own shape - left alone.
             part.transform.position = teMid + teDir * (fpCentreFrac * teLen);
             sharedBaseLength = fpLengthFrac * teLen;
             // Shear = -tan(TE sweep), held at the mesh's limit beyond it. The target is
             // recomputed from the wing every pass, so nothing is lost while it's pinned.
             sharedBaseOffsetRoot = ClampCtrlSrfOffset(-dTZ / geo.sharedBaseLength);
             sharedBaseOffsetTip = sharedBaseOffsetRoot;
+            // Thickness scales with the wing's at each end.
+            WingThicknessAtEnds(geo, out float wtRoot, out float wtTip);
+            sharedBaseThicknessRoot = fpThickRootFrac * wtRoot;
+            sharedBaseThicknessTip = fpThickTipFrac * wtTip;
 
             // The editor's gizmos treat attPos0/attRotation0 as the part's home (reset
             // snaps back to them), and attachPart sets them from the local pose. Keep
