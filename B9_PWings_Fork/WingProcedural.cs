@@ -1598,24 +1598,19 @@ namespace WingProcedural
         }
 
         // World-space span endpoints of this control surface (root = inboard end,
-        // nearer the parent wing). Derived from the ctrl-frame mesh bounds so we don't
-        // depend on the local axis convention.
+        // nearer the parent wing). The origin sits at the hinge's mid-span and the
+        // hinge runs along part-local X, so the ends are half a length either way.
+        // (Reading them off the mesh bounds' longest axis instead picked the chord on
+        // a deep rudder, and bisect then cut, placed and re-anchored chordwise.)
         private bool SpanEndpoints(out Vector3 root, out Vector3 tip)
         {
             root = Vector3.zero; tip = Vector3.zero;
-            MeshFilter mf = meshFilterCtrlFrame;
-            if (mf == null || mf.sharedMesh == null)
+            if (sharedBaseLength < 1e-4f)
                 return false;
 
-            Bounds b = mf.sharedMesh.bounds;
-            Vector3 ext = b.extents;
-            Vector3 axis; float halfLen;
-            if (ext.x >= ext.y && ext.x >= ext.z) { axis = Vector3.right; halfLen = ext.x; }
-            else if (ext.y >= ext.z) { axis = Vector3.up; halfLen = ext.y; }
-            else { axis = Vector3.forward; halfLen = ext.z; }
-
-            Vector3 e0 = mf.transform.TransformPoint(b.center + axis * halfLen);
-            Vector3 e1 = mf.transform.TransformPoint(b.center - axis * halfLen);
+            Vector3 half = part.transform.right * (sharedBaseLength * 0.5f);
+            Vector3 e0 = part.transform.position + half;
+            Vector3 e1 = part.transform.position - half;
             if (part.parent != null)
             {
                 // Root is the end at the parent wing's ROOT, i.e. span-position ~0 (the wing
