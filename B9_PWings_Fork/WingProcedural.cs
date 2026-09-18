@@ -1210,11 +1210,40 @@ namespace WingProcedural
         // mesh then swaps root and tip while the transform stays put, so the control looks
         // turned end for end. The two sides' conventions differ by exactly a half turn
         // about the chord axis (see CtrlSrfRotationForWing); applying it restores what
-        // the user saw. Unknown until the part has been attached (or loaded attached), so
-        // a fresh part or symmetry clone - which KSP has already posed for its side - is
-        // left alone.
+        // the user saw. Unknown until the part has been attached or loaded attached, so a
+        // fresh part from the list is left alone; a copy inherits a side from its
+        // original (see OnWasCopied).
         private bool mirrorKnown = false;
         private bool isMirroredPrev = false;
+
+        // A copy's pose is derived from the original's, so the side it is built for
+        // follows from the original's: a mirror-symmetry clone is the mirror image and
+        // so built for the OPPOSITE side; a radial clone or an Alt+click copy is a
+        // rotation or a straight copy and keeps the original's. Its own attach then
+        // compares that with where it landed. Called on the original, before the copy's
+        // OnCopy and OnStart. An original that has never been attached has no known
+        // side, and neither then does its copy.
+        public override void OnWasCopied(PartModule copyPartModule, bool asSymCounterpart)
+        {
+            base.OnWasCopied(copyPartModule, asSymCounterpart);
+            if (!(copyPartModule is WingProcedural copy) || !isCtrlSrf || isWingAsCtrlSrf || !mirrorKnown)
+                return;
+            bool mirrored = asSymCounterpart
+                && EditorLogic.fetch != null && EditorLogic.fetch.symmetryMethod == SymmetryMethod.Mirror;
+            copy.mirrorKnown = true;
+            copy.isMirroredPrev = mirrored ? !isMirroredPrev : isMirroredPrev;
+            // Build the copy for that side straight away, so the ghost being dragged
+            // looks right; its attach recomputes the flag from where it lands anyway.
+            copy.isMirrored = copy.isMirroredPrev;
+        }
+
+        // A copy sits wherever it sits; nothing about the original's edge station applies.
+        public override void OnCopy(PartModule fromModule)
+        {
+            base.OnCopy(fromModule);
+            fpInit = false;
+            fpApplied = false;
+        }
 
         private void CompensateMirrorSideChange()
         {
@@ -1227,19 +1256,6 @@ namespace WingProcedural
                 return;
 
             HalfTurnAboutChord(part);
-            // A carried wing's counterparts were mirrored from this control's pose while
-            // it was still on the old side, so they need the same half turn. They are
-            // fresh clones with no history; mark them as already built for their side
-            // (the opposite of this one's) so their own attach doesn't turn them again.
-            foreach (Part p in part.symmetryCounterparts)
-            {
-                WingProcedural c = FirstOfTypeOrDefault<WingProcedural>(p.Modules);
-                if (c == null || c.mirrorKnown)
-                    continue;
-                HalfTurnAboutChord(p);
-                c.mirrorKnown = true;
-                c.isMirroredPrev = !isMirrored;
-            }
         }
 
         private static void HalfTurnAboutChord(Part p)
@@ -2009,9 +2025,11 @@ namespace WingProcedural
             Setup();
             part.OnEditorAttach += new Callback(UpdateOnEditorAttach);
             part.OnEditorDetach += new Callback(UpdateOnEditorDetach);
-            // Loaded in place: whatever side it's on, it was saved built for it. (A part
-            // spawned or cloned for placement has no parent yet and stays unknown.)
-            if (part.parent != null)
+            // Loaded in place: whatever side it's on, it was saved built for it. A part
+            // spawned for placement has no parent yet; a copy already has its side from
+            // OnWasCopied (its children have parents, so the parent test alone would
+            // wrongly stamp them with the original's side).
+            if (part.parent != null && !part.isClone)
             {
                 mirrorKnown = true;
                 isMirroredPrev = isMirrored;
