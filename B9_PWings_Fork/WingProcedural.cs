@@ -909,6 +909,8 @@ namespace WingProcedural
                     cs.isAttached = true;
                     WingProcedural pw = FirstOfTypeOrDefault<WingProcedural>(parentWing.Modules);
                     cs.isMirrored = pw != null && pw.isMirrored;
+                    cs.mirrorKnown = true;
+                    cs.isMirroredPrev = cs.isMirrored;
                     configure(cs);
                 }
 
@@ -1003,36 +1005,16 @@ namespace WingProcedural
 
         // Link parts as a mirror-symmetry group so the editor moves/deletes them together
         // instead of duplicating on edit.
-        private static void LinkMirrorSymmetry(List<Part> parts)
+        private static void LinkSymmetry(List<Part> parts, SymmetryMethod method)
         {
             if (parts == null || parts.Count < 2) return;
             foreach (Part a in parts)
             {
-                a.symMethod = SymmetryMethod.Mirror;
+                a.symMethod = method;
                 a.symmetryCounterparts.Clear();
                 foreach (Part b in parts)
                     if (b != a) a.symmetryCounterparts.Add(b);
             }
-        }
-
-        // Reflect a world pose across the vessel's mirror-symmetry plane (through the root
-        // part, normal = root's right axis). A control-surface counterpart must be a true
-        // reflection of the primary, not the same relative pose (verified against a
-        // hand-placed reference craft: counterpart rot = reflected primary rot).
-        private static void ReflectAcrossSymmetryPlane(Vector3 pos, Quaternion rot, out Vector3 rPos, out Quaternion rRot)
-        {
-            Vector3 n = Vector3.right;
-            Vector3 p0 = Vector3.zero;
-            if (EditorLogic.SortedShipList != null && EditorLogic.SortedShipList.Count > 0)
-            {
-                Part root = EditorLogic.SortedShipList[0];
-                n = root.transform.right.normalized;
-                p0 = root.transform.position;
-            }
-            rPos = pos - 2f * Vector3.Dot(pos - p0, n) * n;
-            Vector3 v = new Vector3(rot.x, rot.y, rot.z);
-            Vector3 vr = -v + 2f * Vector3.Dot(v, n) * n;
-            rRot = new Quaternion(vr.x, vr.y, vr.z, rot.w);
         }
 
         // World position where a full-span split control surface's origin should sit.
@@ -1056,17 +1038,24 @@ namespace WingProcedural
         }
 
         // Rotation for a control surface attached to a wing's trailing edge: the wing's
-        // rotation turned 180 deg about its local up axis, plus a small tilt about the
-        // chord axis so the surface's span follows the wing's (swept) trailing edge.
-        // Both terms were verified against a hand-placed reference craft.
+        // rotation, a small tilt about the thickness axis so the surface's span follows
+        // the wing's (swept) trailing edge, and on the isMirrored side a half turn about
+        // the chord axis. That half turn is KSP's own convention: mirroring a part adds
+        // 180 deg about its up axis only when its surface-attach node lies along X, which
+        // is true of a wing (node -1,0,0) and false of a control surface (node 0,1,0), so
+        // the two sides of the symmetry plane hold a control the opposite way round
+        // relative to the wing. The control mesh's isMirrored root/tip swap is built for
+        // that. The mirrored form was verified against a hand-placed reference craft, the
+        // other by checking that KSP's own mirror of it comes out identical.
         private static Quaternion CtrlSrfRotationForWing(WingProcedural wing)
         {
             float rootTZ = wing.sharedBaseWidthRoot * 0.5f - wing.sharedBaseOffsetRoot;
             float tipTZ = wing.sharedBaseWidthTip * 0.5f + wing.sharedBaseOffsetTip;
             float tilt = Mathf.Atan2(rootTZ - tipTZ, wing.sharedBaseLength) * Mathf.Rad2Deg;
-            return wing.part.transform.rotation
-                 * Quaternion.AngleAxis(tilt, Vector3.forward)
-                 * Quaternion.AngleAxis(180f, Vector3.up);
+            Quaternion rot = wing.part.transform.rotation * Quaternion.AngleAxis(tilt, Vector3.forward);
+            if (wing.isMirrored)
+                rot *= Quaternion.AngleAxis(180f, Vector3.up);
+            return rot;
         }
 
         /// <summary>
@@ -1169,23 +1158,23 @@ namespace WingProcedural
             else
             {
                 attached.Add(primary);
-                // Place each counterpart as a true reflection of the primary's pose so it
-                // mirrors correctly (same relative pose gave a rotated, un-mirrored copy).
-                Vector3 primaryPos = TrailingEdgeMidspanWorld();
-                Quaternion primaryRot = CtrlSrfRotationForWing(this);
+                // Pose each counterpart from its own wing, the same way as the primary.
+                // CtrlSrfRotationForWing already knows which way round a control sits on
+                // each side of the symmetry plane, and a radial counterpart is just
+                // another wing; reflecting the primary's pose instead was only right for
+                // a 2x mirror pair with the root's right axis on world X.
                 foreach (Part p in part.symmetryCounterparts)
                 {
                     WingProcedural w = FirstOfTypeOrDefault<WingProcedural>(p.Modules);
                     if (w == null) continue;
-                    ReflectAcrossSymmetryPlane(primaryPos, primaryRot, out Vector3 cPos, out Quaternion cRot);
                     try
                     {
-                        Part cp = AttachCtrlSrfTo(ap, p, cPos, cRot, cfg);
+                        Part cp = AttachCtrlSrfTo(ap, p, TrailingEdgeMidspanWorld(w, p.transform), CtrlSrfRotationForWing(w), cfg);
                         if (cp != null) attached.Add(cp);
                     }
                     catch (Exception e) { Debug.LogError("[B9PW] Split counterpart auto-attach failed: " + e); }
                 }
-                LinkMirrorSymmetry(attached);
+                LinkSymmetry(attached, part.symMethod);
             }
 
             // Square off this wing and its counterparts: zero the trailing edge so the
@@ -1212,6 +1201,55 @@ namespace WingProcedural
         }
 
         #endregion Split trailing edge into control surface
+
+        #region Mirror side
+
+        // Side of the symmetry plane this control was last built for. UpdateOnEditorAttach
+        // recomputes isMirrored whenever the part is attached - including as a child of a
+        // wing the user carried across the plane or turned vertical - and the control
+        // mesh then swaps root and tip while the transform stays put, so the control looks
+        // turned end for end. The two sides' conventions differ by exactly a half turn
+        // about the chord axis (see CtrlSrfRotationForWing); applying it restores what
+        // the user saw. Unknown until the part has been attached (or loaded attached), so
+        // a fresh part or symmetry clone - which KSP has already posed for its side - is
+        // left alone.
+        private bool mirrorKnown = false;
+        private bool isMirroredPrev = false;
+
+        private void CompensateMirrorSideChange()
+        {
+            if (!isCtrlSrf || isWingAsCtrlSrf)
+                return;
+            bool changed = mirrorKnown && isMirrored != isMirroredPrev;
+            mirrorKnown = true;
+            isMirroredPrev = isMirrored;
+            if (!changed)
+                return;
+
+            HalfTurnAboutChord(part);
+            // A carried wing's counterparts were mirrored from this control's pose while
+            // it was still on the old side, so they need the same half turn. They are
+            // fresh clones with no history; mark them as already built for their side
+            // (the opposite of this one's) so their own attach doesn't turn them again.
+            foreach (Part p in part.symmetryCounterparts)
+            {
+                WingProcedural c = FirstOfTypeOrDefault<WingProcedural>(p.Modules);
+                if (c == null || c.mirrorKnown)
+                    continue;
+                HalfTurnAboutChord(p);
+                c.mirrorKnown = true;
+                c.isMirroredPrev = !isMirrored;
+            }
+        }
+
+        private static void HalfTurnAboutChord(Part p)
+        {
+            p.transform.rotation *= Quaternion.AngleAxis(180f, Vector3.up);
+            p.attPos0 = p.transform.localPosition;
+            p.attRotation0 = p.transform.localRotation;
+        }
+
+        #endregion Mirror side
 
         #region Follow parent wing
 
@@ -1611,6 +1649,11 @@ namespace WingProcedural
                 cs.sharedEdgeTypeTrailing = teType;
                 cs.sharedEdgeWidthTrailingRoot = cutEdge;
                 cs.sharedEdgeWidthTrailingTip = tipEdge;
+                // Posed from this control, so it must be built for this control's side -
+                // which can differ from the wing's for a rudder on a centreline fin.
+                cs.isMirrored = isMirrored;
+                cs.mirrorKnown = true;
+                cs.isMirroredPrev = isMirrored;
                 CopyColoursBySection(part, cs.part);
             };
 
@@ -1665,7 +1708,7 @@ namespace WingProcedural
                         catch (Exception e) { Debug.LogError("[B9PW] Bisect counterpart auto-attach failed: " + e); }
                     }
                 }
-                LinkMirrorSymmetry(attached);
+                LinkSymmetry(attached, part.symMethod);
             }
 
             // Crop this part (and its symmetry counterparts) to the inboard [0,f] half.
@@ -1922,6 +1965,13 @@ namespace WingProcedural
             Setup();
             part.OnEditorAttach += new Callback(UpdateOnEditorAttach);
             part.OnEditorDetach += new Callback(UpdateOnEditorDetach);
+            // Loaded in place: whatever side it's on, it was saved built for it. (A part
+            // spawned or cloned for placement has no parent yet and stays unknown.)
+            if (part.parent != null)
+            {
+                mirrorKnown = true;
+                isMirroredPrev = isMirrored;
+            }
 
             if (!UIUtility.uiStyleConfigured)
             {
@@ -2206,6 +2256,8 @@ namespace WingProcedural
                 &&
                 Vector3.Dot(EditorLogic.SortedShipList[0].transform.right, part.transform.position - EditorLogic.SortedShipList[0].transform.position) < 0
             ;
+
+            CompensateMirrorSideChange();
 
             isAttached = true;
             UpdateGeometry(true);
