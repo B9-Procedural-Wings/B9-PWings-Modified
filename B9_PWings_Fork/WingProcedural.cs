@@ -1266,6 +1266,11 @@ namespace WingProcedural
         // (root end nearer the wing root). A freshly split control has 1 at both ends and
         // simply tracks the wing; one the user thinned keeps its ratio.
         private float fpThickRootFrac = 1f, fpThickTipFrac = 1f;
+        // Whether this control sits on the wing's trailing edge at all. A slat, spoiler
+        // or wingtip control is attached to the same wing but has no business being
+        // dragged onto the trailing edge, so those are left alone. Decided at capture,
+        // i.e. re-decided whenever the user moves the control or re-attaches it.
+        private bool fpOnEdge = false;
         // The control's span as FRACTIONS of the wing's trailing edge: how long it is
         // (lengthFrac) and where its centre sits relative to TE midspan (centreFrac, in
         // -0.5..+0.5 along the TE). Preserving these is what keeps a flaps/aileron setup
@@ -1333,7 +1338,8 @@ namespace WingProcedural
                 return;
             }
 
-            ApplyFollow(wing, geo);
+            if (fpOnEdge)
+                ApplyFollow(wing, geo);
         }
 
         // The wing module whose fields the follow reads: the lowest instance ID across the
@@ -1414,8 +1420,20 @@ namespace WingProcedural
                 return false;
             Vector3 teDir = wing.part.transform.TransformDirection(teDirLocal);
             fpLengthFrac = sharedBaseLength / teLen;
-            fpCentreFrac = Vector3.Dot(part.transform.position - teMid, teDir) / teLen;
+            Vector3 fromMid = part.transform.position - teMid;
+            float along = Vector3.Dot(fromMid, teDir);
+            fpCentreFrac = along / teLen;
             fpRelRot = Quaternion.Inverse(TrailingEdgeFrameWorld(wing, teDirLocal)) * part.transform.rotation;
+
+            // On the edge: hinge close to the trailing-edge line (a spoiler is half a
+            // chord forward, a slat a whole one), roughly parallel to it, and within it.
+            float offLine = (fromMid - teDir * along).magnitude;
+            float meanChord = 0.5f * (geo.sharedBaseWidthRoot + geo.sharedBaseWidthTip);
+            float alignment = Mathf.Abs(Vector3.Dot(part.transform.right, teDir));
+            fpOnEdge = offLine <= 0.1f * meanChord + 0.05f
+                    && alignment >= 0.7f
+                    && Mathf.Abs(fpCentreFrac) <= 0.6f;
+
             WingThicknessAtEnds(geo, out float wtRoot, out float wtTip);
             fpThickRootFrac = wtRoot > 1e-4f ? sharedBaseThicknessRoot / wtRoot : 1f;
             fpThickTipFrac = wtTip > 1e-4f ? sharedBaseThicknessTip / wtTip : 1f;
