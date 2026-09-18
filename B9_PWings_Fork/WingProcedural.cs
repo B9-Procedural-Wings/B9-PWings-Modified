@@ -1678,8 +1678,10 @@ namespace WingProcedural
             float tipEdge = sharedEdgeWidthTrailingTip;
             float teType = sharedEdgeTypeTrailing;
 
-            // Outboard [f,1] piece geometry.
-            Action<WingProcedural> cfg = cs =>
+            // Outboard [f,1] piece geometry. Built per source control: a symmetry
+            // counterpart's piece is posed from that counterpart, so it must carry that
+            // counterpart's side and colours, not this control's.
+            Func<WingProcedural, Action<WingProcedural>> cfgFor = src => cs =>
             {
                 cs.sharedBaseLength = (1f - f) * L;
                 cs.sharedBaseWidthRoot = cutWidth;
@@ -1691,12 +1693,12 @@ namespace WingProcedural
                 cs.sharedEdgeTypeTrailing = teType;
                 cs.sharedEdgeWidthTrailingRoot = cutEdge;
                 cs.sharedEdgeWidthTrailingTip = tipEdge;
-                // Posed from this control, so it must be built for this control's side -
-                // which can differ from the wing's for a rudder on a centreline fin.
-                cs.isMirrored = isMirrored;
+                // Posed from the source control, so it must be built for that control's
+                // side - which can differ from the wing's for a rudder on a centreline fin.
+                cs.isMirrored = src.isMirrored;
                 cs.mirrorKnown = true;
-                cs.isMirroredPrev = isMirrored;
-                CopyColoursBySection(part, cs.part);
+                cs.isMirroredPrev = src.isMirrored;
+                CopyColoursBySection(src.part, cs.part);
             };
 
             // Both halves must stay the same part as the surface being bisected.
@@ -1721,7 +1723,7 @@ namespace WingProcedural
                 // by ~half the chord and caused the outboard gap). Origin is at the span
                 // centre; the outboard [f,1] centre is f/2*L toward the tip.
                 Vector3 obc = part.transform.position + (tip - root).normalized * (f * 0.5f * sharedBaseLength);
-                try { primary = AttachCtrlSrfTo(ap, part.parent, obc, part.transform.rotation, cfg); }
+                try { primary = AttachCtrlSrfTo(ap, part.parent, obc, part.transform.rotation, cfgFor(this)); }
                 catch (Exception e) { Debug.LogError("[B9PW] Bisect auto-attach EXC -> one-click: " + e); }
             }
             else
@@ -1731,7 +1733,7 @@ namespace WingProcedural
 
             if (primary == null)
             {
-                SpawnOnCursor(ap, cfg);
+                SpawnOnCursor(ap, cfgFor(this));
             }
             else
             {
@@ -1744,7 +1746,7 @@ namespace WingProcedural
                         Vector3 obc2 = sc.part.transform.position + (t2 - r2).normalized * (f * 0.5f * sc.sharedBaseLength);
                         try
                         {
-                            Part cp = AttachCtrlSrfTo(ap, p.parent, obc2, p.transform.rotation, cfg);
+                            Part cp = AttachCtrlSrfTo(ap, p.parent, obc2, p.transform.rotation, cfgFor(sc));
                             if (cp != null) attached.Add(cp);
                         }
                         catch (Exception e) { Debug.LogError("[B9PW] Bisect counterpart auto-attach failed: " + e); }
