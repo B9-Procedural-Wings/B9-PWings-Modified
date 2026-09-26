@@ -1669,6 +1669,19 @@ namespace WingProcedural
             return true;
         }
 
+        /// <summary>
+        /// Bisect this control surface spanwise at <paramref name="fraction"/> of its length from the root end
+        /// (0..1), as a click on the surface at that station does: this part keeps the inboard piece and a new
+        /// control takes the outboard one, on every symmetry counterpart too. For scripts and tests; cuts within
+        /// 3% of either end are ignored, as they are for a click.
+        /// </summary>
+        public void BisectAtFraction(float fraction)
+        {
+            if (!isCtrlSrf || !isAttached)
+                return;
+            BisectAt(Mathf.Clamp01(fraction));
+        }
+
         private void BisectAt(float f)
         {
             if (f <= 0.03f || f >= 0.97f)
