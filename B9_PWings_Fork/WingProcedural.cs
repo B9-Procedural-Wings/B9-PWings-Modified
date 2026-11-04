@@ -778,8 +778,8 @@ namespace WingProcedural
         // - and with it aspect ratio - falls off as cos(sweep). Rotating the PART transform
         // would fight the physics joints in flight, so what actually moves is the model child,
         // the same trick CtrlSrfWingSynchronizer uses for control deflection. The pivot is the
-        // part origin, which is where node_attach and the root chord centre both sit, i.e.
-        // "centre of the wing root".
+        // part origin, which is where node_attach and the root chord center both sit, i.e.
+        // "center of the wing root".
 
         public const int SweepModeNone = 0;
         public const int SweepModeSweep = 1;
@@ -1564,7 +1564,7 @@ namespace WingProcedural
 
         /// <summary>
         /// Delete the reinforcement joints that pin the wing. KJR ignores the robotic lock events
-        /// for a part it does not recognise as robotic, and its joints block rotation through their
+        /// for a part it does not recognize as robotic, and its joints block rotation through their
         /// locked LINEAR axes, so loosening them is not an option either - they have to go. The
         /// attach joint stays, and so does anything holding our own children on, which means the
         /// worst case is that the wing reverts to stock joint stiffness while it sweeps. KJR

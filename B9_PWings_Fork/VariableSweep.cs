@@ -50,7 +50,7 @@ namespace WingProcedural
 
         /// <summary>
         /// Flap setting 0-3, or -1 when the vessel has no flap source of its own to read.
-        /// Memoised per frame so a craft carrying dozens of wings only walks the part list once.
+        /// Memoized per frame so a craft carrying dozens of wings only walks the part list once.
         /// </summary>
         public static int VesselFlapLevel(Vessel v)
         {
