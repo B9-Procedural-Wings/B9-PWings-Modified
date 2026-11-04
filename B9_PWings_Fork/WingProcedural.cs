@@ -990,68 +990,40 @@ namespace WingProcedural
             catch (Exception e) { Debug.LogWarning("[B9PW] CopyTrailingColorToAll failed: " + e); }
         }
 
-        // Bisect: copy each section's color from the source surface to the new one.
-        private static void CopyColorsBySection(Part src, Part dst)
+        // Persistent fields that are not a player's setting, so CopyFields never copies them
+        // unasked: the new part's own state (isAttached, isSetToDefaultValues), and FAR's
+        // mass override, which is set for the source part's own size.
+        private static readonly HashSet<string> NeverCopy = new HashSet<string>
         {
-            try
-            {
-                List<PartModule> s = TextureSwitches(src);
-                List<PartModule> d = TextureSwitches(dst);
-                for (int i = 0; i < d.Count && i < s.Count; i++)
-                    SetTSData(d[i], GetTSField(s[i], "persistentData"));
-            }
-            catch (Exception e) { Debug.LogWarning("[B9PW] CopyColorsBySection failed: " + e); }
-        }
+            nameof(isAttached), nameof(isSetToDefaultValues), "massOverride",
+        };
 
-        // Bisect: carry the source surface's own settings onto the new piece - FAR's
-        // mass-strength multiplier, the control axes, deflection, deploy and authority
-        // settings, B9 materials, and so on - by copying every persistent field of every
-        // module. Runs before the new part starts, as a craft load would set them. The
-        // caller sets the piece's geometry afterwards. isAttached and isSetToDefaultValues
-        // describe the new part's own state, not a setting, so they are left alone.
-        // Split: FAR's mass-strength multiplier lives on FARWingAerodynamicModel on a wing
-        // and on FARControllableSurface (a subclass) on a control, so the modules don't
-        // pair up by name; copy the one field from whichever module carries it. No-op
-        // without FAR.
-        private static void CopyMassStrength(Part src, Part dst)
+        // Copy settings from src to dst before dst starts, as a craft load would set them.
+        // Each dst module copies from the src module of its own type, or failing that of a
+        // base type - so a wing's FARWingAerodynamicModel feeds a control's
+        // FARControllableSurface, and a module dst has no counterpart for keeps its
+        // defaults. Pairing by type rather than by position means a module added or moved
+        // at runtime can't shift every module after it. names: copy just these fields;
+        // null: every persistent field except NeverCopy.
+        private static void CopyFields(Part src, Part dst, ICollection<string> names = null)
         {
-            const string field = "massMultiplier";
-            BaseField sf = null;
-            PartModule sm = null;
-            foreach (PartModule m in src.Modules)
-                if ((sf = m.Fields[field]) != null) { sm = m; break; }
-            if (sf == null)
-                return;
-            foreach (PartModule m in dst.Modules)
+            List<PartModule> unused = src.Modules.Cast<PartModule>().ToList();
+            foreach (PartModule d in dst.Modules)
             {
-                BaseField df = m.Fields[field];
-                if (df == null)
+                PartModule s = unused.FirstOrDefault(m => m.GetType() == d.GetType())
+                            ?? unused.FirstOrDefault(m => m.GetType().IsInstanceOfType(d));
+                if (s == null)
                     continue;
-                try { df.SetValue(sf.GetValue(sm), m); }
-                catch (Exception e) { Debug.LogWarning("[B9PW] CopyMassStrength: " + e.Message); }
-                return;
-            }
-        }
-
-        private static void CopyPartSettings(Part src, Part dst)
-        {
-            for (int i = 0; i < src.Modules.Count && i < dst.Modules.Count; i++)
-            {
-                PartModule s = src.Modules[i];
-                PartModule d = dst.Modules[i];
-                if (s.moduleName != d.moduleName)
-                    continue;
+                unused.Remove(s);
                 foreach (BaseField f in s.Fields)
                 {
-                    if (!f.isPersistant)
-                        continue;
-                    if (s is WingProcedural && (f.name == nameof(isAttached) || f.name == nameof(isSetToDefaultValues)))
+                    if (names != null ? !names.Contains(f.name) : (!f.isPersistant || NeverCopy.Contains(f.name)))
                         continue;
                     BaseField df = d.Fields[f.name];
                     if (df == null)
                         continue;
                     try { df.SetValue(f.GetValue(s), d); }
-                    catch (Exception e) { Debug.LogWarning("[B9PW] CopyPartSettings: " + s.moduleName + "." + f.name + ": " + e.Message); }
+                    catch (Exception e) { Debug.LogWarning("[B9PW] CopyFields: " + s.moduleName + "." + f.name + ": " + e.Message); }
                 }
             }
         }
@@ -1175,7 +1147,9 @@ namespace WingProcedural
             // Geometric (not a fit); matches hand-matched crafts to <1% at 9-49deg sweep.
             float splitTeScale = splitDegenerate ? 1f : sharedBaseLength / splitTELength;
 
-            Action<WingProcedural> cfg = cs =>
+            // Built per wing: each control takes its color and mass-strength from the wing
+            // it is attached to, which a counterpart edited with symmetry off can differ in.
+            Func<WingProcedural, Action<WingProcedural>> cfgFor = wing => cs =>
             {
                 cs.sharedBaseLength = splitTELength;
                 // Zero body width: the control is purely the reproduced (curved) trailing
@@ -1194,20 +1168,20 @@ namespace WingProcedural
                 cs.sharedEdgeTypeTrailing = Mathf.Clamp(teType - 1f, 1f, 3f);
                 cs.sharedEdgeWidthTrailingRoot = teRoot * splitTeScale;
                 cs.sharedEdgeWidthTrailingTip = teTip * splitTeScale;
-                CopyTrailingColorToAll(part, cs.part);
-                CopyMassStrength(part, cs.part);
+                CopyTrailingColorToAll(wing.part, cs.part);
+                CopyFields(wing.part, cs.part, new[] { "massMultiplier" });   // FAR mass-strength
             };
 
             // Auto-attach at the wing's trailing-edge mid-span with the calibrated pose;
             // fall back to one-click place on any failure.
             List<Part> attached = new List<Part>();
             Part primary = null;
-            try { primary = AttachCtrlSrfTo(ap, part, TrailingEdgeMidspanWorld(), CtrlSrfRotationForWing(this), cfg); }
+            try { primary = AttachCtrlSrfTo(ap, part, TrailingEdgeMidspanWorld(), CtrlSrfRotationForWing(this), cfgFor(this)); }
             catch (Exception e) { Debug.LogError("[B9PW] Split auto-attach failed, falling back to one-click: " + e); }
 
             if (primary == null)
             {
-                SpawnOnCursor(ap, cfg);
+                SpawnOnCursor(ap, cfgFor(this));
             }
             else
             {
@@ -1223,7 +1197,7 @@ namespace WingProcedural
                     if (w == null) continue;
                     try
                     {
-                        Part cp = AttachCtrlSrfTo(ap, p, TrailingEdgeMidspanWorld(w, p.transform), CtrlSrfRotationForWing(w), cfg);
+                        Part cp = AttachCtrlSrfTo(ap, p, TrailingEdgeMidspanWorld(w, p.transform), CtrlSrfRotationForWing(w), cfgFor(w));
                         if (cp != null) attached.Add(cp);
                     }
                     catch (Exception e) { Debug.LogError("[B9PW] Split counterpart auto-attach failed: " + e); }
@@ -1727,12 +1701,18 @@ namespace WingProcedural
         /// Bisect this control surface spanwise at <paramref name="fraction"/> of its length from the root end
         /// (0..1), as a click on the surface at that station does: this part keeps the inboard piece and a new
         /// control takes the outboard one, on every symmetry counterpart too. For scripts and tests; cuts within
-        /// 3% of either end are ignored, as they are for a click.
+        /// 3% of either end are ignored, as they are for a click. Editor only; leaves bisect mode if it is on.
         /// </summary>
         public void BisectAtFraction(float fraction)
         {
-            if (!isCtrlSrf || !isAttached)
+            // The new piece is registered with the editor's ship; in flight it would be an orphan.
+            if (!HighLogic.LoadedSceneIsEditor || EditorLogic.fetch == null)
                 return;
+            if (!isCtrlSrf || !isAttached || float.IsNaN(fraction))
+                return;
+            // No click to swallow here, so the input lock can go at once.
+            if (bisectMode)
+                ExitBisectMode();
             BisectAt(Mathf.Clamp01(fraction));
         }
 
@@ -1766,8 +1746,9 @@ namespace WingProcedural
             // counterpart's side and colors, not this control's.
             Func<WingProcedural, Action<WingProcedural>> cfgFor = src => cs =>
             {
-                // Everything but the geometry stays as the source had it.
-                CopyPartSettings(src.part, cs.part);
+                // Everything but the geometry stays as the source had it: FAR mass-strength,
+                // axes and deflections, stock deploy and authority, B9 materials, TU colors.
+                CopyFields(src.part, cs.part);
                 cs.sharedBaseLength = (1f - f) * L;
                 cs.sharedBaseWidthRoot = cutWidth;
                 cs.sharedBaseWidthTip = tipWidth;
@@ -1783,7 +1764,6 @@ namespace WingProcedural
                 cs.isMirrored = src.isMirrored;
                 cs.mirrorKnown = true;
                 cs.isMirroredPrev = src.isMirrored;
-                CopyColorsBySection(src.part, cs.part);
             };
 
             // Both halves must stay the same part as the surface being bisected.
