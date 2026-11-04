@@ -942,8 +942,8 @@ namespace WingProcedural
             }
         }
 
-        // --- TexturesUnlimited colour copy ---
-        // Colours live in each KSPTextureSwitch.persistentData (per section: surface,
+        // --- TexturesUnlimited color copy ---
+        // Colors live in each KSPTextureSwitch.persistentData (per section: surface,
         // section, leading edge, trailing edge). Set before the new part starts so its
         // TU module applies them. Best-effort; no-op without TU.
         private static List<PartModule> TextureSwitches(Part p)
@@ -969,8 +969,8 @@ namespace WingProcedural
             if (f != null) f.SetValue(m, persistentData);
         }
 
-        // Split: apply the wing's trailing-edge colour to every section of the surface.
-        private static void CopyTrailingColourToAll(Part wing, Part cs)
+        // Split: apply the wing's trailing-edge color to every section of the surface.
+        private static void CopyTrailingColorToAll(Part wing, Part cs)
         {
             try
             {
@@ -987,11 +987,11 @@ namespace WingProcedural
                 foreach (PartModule dm in TextureSwitches(cs))
                     SetTSData(dm, pd);
             }
-            catch (Exception e) { Debug.LogWarning("[B9PW] CopyTrailingColourToAll failed: " + e); }
+            catch (Exception e) { Debug.LogWarning("[B9PW] CopyTrailingColorToAll failed: " + e); }
         }
 
-        // Bisect: copy each section's colour from the source surface to the new one.
-        private static void CopyColoursBySection(Part src, Part dst)
+        // Bisect: copy each section's color from the source surface to the new one.
+        private static void CopyColorsBySection(Part src, Part dst)
         {
             try
             {
@@ -1000,7 +1000,7 @@ namespace WingProcedural
                 for (int i = 0; i < d.Count && i < s.Count; i++)
                     SetTSData(d[i], GetTSField(s[i], "persistentData"));
             }
-            catch (Exception e) { Debug.LogWarning("[B9PW] CopyColoursBySection failed: " + e); }
+            catch (Exception e) { Debug.LogWarning("[B9PW] CopyColorsBySection failed: " + e); }
         }
 
         // Bisect: carry the source surface's own settings onto the new piece - FAR's
@@ -1148,7 +1148,7 @@ namespace WingProcedural
                 return;
             }
 
-            // Configure the surface to reproduce this wing's trailing edge and colours
+            // Configure the surface to reproduce this wing's trailing edge and colors
             // (kept because isSetToDefaultValues is set before SetupFields runs).
             // The control surface spans the wing's TRAILING EDGE, which on a swept wing
             // is longer than the span: its length is the hypotenuse of the span and the
@@ -1194,7 +1194,7 @@ namespace WingProcedural
                 cs.sharedEdgeTypeTrailing = Mathf.Clamp(teType - 1f, 1f, 3f);
                 cs.sharedEdgeWidthTrailingRoot = teRoot * splitTeScale;
                 cs.sharedEdgeWidthTrailingTip = teTip * splitTeScale;
-                CopyTrailingColourToAll(part, cs.part);
+                CopyTrailingColorToAll(part, cs.part);
                 CopyMassStrength(part, cs.part);
             };
 
@@ -1329,7 +1329,7 @@ namespace WingProcedural
         // wing->control mapping is the same one the split derives: length = swept-TE length,
         // offset = -tan(sweep), pose = trailing-edge midspan + sweep tilt. te-width is NOT
         // re-derived - the split zeroed the wing's te, so the wing no longer carries it, and
-        // keeping the control's te is the "keep shape" behaviour.
+        // keeping the control's te is the "keep shape" behavior.
         private bool fpInit = false;
         private float fpLen, fpWR, fpWT, fpOR, fpOT, fpTR, fpTT;
         // Each end's thickness as a FRACTION of the wing's thickness at that span station
@@ -1342,10 +1342,10 @@ namespace WingProcedural
         // i.e. re-decided whenever the user moves the control or re-attaches it.
         private bool fpOnEdge = false;
         // The control's span as FRACTIONS of the wing's trailing edge: how long it is
-        // (lengthFrac) and where its centre sits relative to TE midspan (centreFrac, in
+        // (lengthFrac) and where its center sits relative to TE midspan (centerFrac, in
         // -0.5..+0.5 along the TE). Preserving these is what keeps a flaps/aileron setup
         // intact - each piece owns a portion of the edge, not the whole thing.
-        private float fpLengthFrac = 1f, fpCentreFrac = 0f;
+        private float fpLengthFrac = 1f, fpCenterFrac = 0f;
         // The control's rotation expressed IN the wing's trailing-edge frame. Re-applying
         // this to the rebuilt frame tracks sweep without ever re-orienting the control
         // itself - so a control keeps whichever way round it already sits.
@@ -1453,14 +1453,14 @@ namespace WingProcedural
         }
 
         // Wing thickness at the span stations of this control's two ends. Stations run
-        // 0 (wing root) to 1 (tip); the control's centre sits at 0.5 + centreFrac and its
+        // 0 (wing root) to 1 (tip); the control's center sits at 0.5 + centerFrac and its
         // ends lengthFrac/2 either side. Its root field maps to the end nearer the wing
         // root on both sides of the symmetry plane (the mesh's isMirrored swap and the
         // pose convention cancel), which is also how the split assigns them.
         private void WingThicknessAtEnds(WingProcedural geo, out float atRoot, out float atTip)
         {
-            float sRoot = Mathf.Clamp01(0.5f + fpCentreFrac - fpLengthFrac * 0.5f);
-            float sTip = Mathf.Clamp01(0.5f + fpCentreFrac + fpLengthFrac * 0.5f);
+            float sRoot = Mathf.Clamp01(0.5f + fpCenterFrac - fpLengthFrac * 0.5f);
+            float sTip = Mathf.Clamp01(0.5f + fpCenterFrac + fpLengthFrac * 0.5f);
             atRoot = Mathf.Lerp(geo.sharedBaseThicknessRoot, geo.sharedBaseThicknessTip, sRoot);
             atTip = Mathf.Lerp(geo.sharedBaseThicknessRoot, geo.sharedBaseThicknessTip, sTip);
         }
@@ -1492,7 +1492,7 @@ namespace WingProcedural
             fpLengthFrac = sharedBaseLength / teLen;
             Vector3 fromMid = part.transform.position - teMid;
             float along = Vector3.Dot(fromMid, teDir);
-            fpCentreFrac = along / teLen;
+            fpCenterFrac = along / teLen;
             fpRelRot = Quaternion.Inverse(TrailingEdgeFrameWorld(wing, teDirLocal)) * part.transform.rotation;
 
             // On the edge: hinge close to the trailing-edge line (a spoiler is half a
@@ -1502,7 +1502,7 @@ namespace WingProcedural
             float alignment = Mathf.Abs(Vector3.Dot(part.transform.right, teDir));
             fpOnEdge = offLine <= 0.1f * meanChord + 0.05f
                     && alignment >= 0.7f
-                    && Mathf.Abs(fpCentreFrac) <= 0.6f;
+                    && Mathf.Abs(fpCenterFrac) <= 0.6f;
 
             WingThicknessAtEnds(geo, out float wtRoot, out float wtTip);
             fpThickRootFrac = wtRoot > 1e-4f ? sharedBaseThicknessRoot / wtRoot : 1f;
@@ -1535,7 +1535,7 @@ namespace WingProcedural
 
             // Keep this control's slice of the edge: same fraction of the length, same
             // station along it. te-width is its own shape - left alone.
-            part.transform.position = teMid + teDir * (fpCentreFrac * teLen);
+            part.transform.position = teMid + teDir * (fpCenterFrac * teLen);
             sharedBaseLength = fpLengthFrac * teLen;
             // Shear = -tan(TE sweep), held at the mesh's limit beyond it. The target is
             // recomputed from the wing every pass, so nothing is lost while it's pinned.
@@ -1763,7 +1763,7 @@ namespace WingProcedural
 
             // Outboard [f,1] piece geometry. Built per source control: a symmetry
             // counterpart's piece is posed from that counterpart, so it must carry that
-            // counterpart's side and colours, not this control's.
+            // counterpart's side and colors, not this control's.
             Func<WingProcedural, Action<WingProcedural>> cfgFor = src => cs =>
             {
                 // Everything but the geometry stays as the source had it.
@@ -1779,11 +1779,11 @@ namespace WingProcedural
                 cs.sharedEdgeWidthTrailingRoot = cutEdge;
                 cs.sharedEdgeWidthTrailingTip = tipEdge;
                 // Posed from the source control, so it must be built for that control's
-                // side - which can differ from the wing's for a rudder on a centreline fin.
+                // side - which can differ from the wing's for a rudder on a centerline fin.
                 cs.isMirrored = src.isMirrored;
                 cs.mirrorKnown = true;
                 cs.isMirroredPrev = src.isMirrored;
-                CopyColoursBySection(src.part, cs.part);
+                CopyColorsBySection(src.part, cs.part);
             };
 
             // Both halves must stay the same part as the surface being bisected.
@@ -1803,10 +1803,10 @@ namespace WingProcedural
             Debug.Log("[B9PW] Bisect: f=" + f.ToString("F3") + " parent=" + haveParent + " span=" + haveSpan);
             if (haveParent && haveSpan)
             {
-                // Base the outboard centre on the surface ORIGIN (which sits on the
-                // trailing-edge line), not the mesh-bounds centre (which is offset back
+                // Base the outboard center on the surface ORIGIN (which sits on the
+                // trailing-edge line), not the mesh-bounds center (which is offset back
                 // by ~half the chord and caused the outboard gap). Origin is at the span
-                // centre; the outboard [f,1] centre is f/2*L toward the tip.
+                // center; the outboard [f,1] center is f/2*L toward the tip.
                 Vector3 obc = part.transform.position + (tip - root).normalized * (f * 0.5f * sharedBaseLength);
                 try { primary = AttachCtrlSrfTo(ap, part.parent, obc, part.transform.rotation, cfgFor(this)); }
                 catch (Exception e) { Debug.LogError("[B9PW] Bisect auto-attach EXC -> one-click: " + e); }
@@ -1857,8 +1857,8 @@ namespace WingProcedural
 
         private static void CropInboard(WingProcedural cs, float f, float L, float cutWidth, float cutTipOffset, float cutThk, float cutEdge)
         {
-            // The ctrl-surface mesh is centred on the part origin, so shortening it
-            // re-centres and shifts the inboard edge. Record the root edge, crop, then
+            // The ctrl-surface mesh is centered on the part origin, so shortening it
+            // re-centers and shifts the inboard edge. Record the root edge, crop, then
             // translate the part to put the root edge back where it was.
             bool haveRoot = cs.SpanEndpoints(out Vector3 rootBefore, out Vector3 tipBefore);
 
