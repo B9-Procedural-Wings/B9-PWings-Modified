@@ -1009,6 +1009,30 @@ namespace WingProcedural
         // module. Runs before the new part starts, as a craft load would set them. The
         // caller sets the piece's geometry afterwards. isAttached and isSetToDefaultValues
         // describe the new part's own state, not a setting, so they are left alone.
+        // Split: FAR's mass-strength multiplier lives on FARWingAerodynamicModel on a wing
+        // and on FARControllableSurface (a subclass) on a control, so the modules don't
+        // pair up by name; copy the one field from whichever module carries it. No-op
+        // without FAR.
+        private static void CopyMassStrength(Part src, Part dst)
+        {
+            const string field = "massMultiplier";
+            BaseField sf = null;
+            PartModule sm = null;
+            foreach (PartModule m in src.Modules)
+                if ((sf = m.Fields[field]) != null) { sm = m; break; }
+            if (sf == null)
+                return;
+            foreach (PartModule m in dst.Modules)
+            {
+                BaseField df = m.Fields[field];
+                if (df == null)
+                    continue;
+                try { df.SetValue(sf.GetValue(sm), m); }
+                catch (Exception e) { Debug.LogWarning("[B9PW] CopyMassStrength: " + e.Message); }
+                return;
+            }
+        }
+
         private static void CopyPartSettings(Part src, Part dst)
         {
             for (int i = 0; i < src.Modules.Count && i < dst.Modules.Count; i++)
@@ -1171,6 +1195,7 @@ namespace WingProcedural
                 cs.sharedEdgeWidthTrailingRoot = teRoot * splitTeScale;
                 cs.sharedEdgeWidthTrailingTip = teTip * splitTeScale;
                 CopyTrailingColourToAll(part, cs.part);
+                CopyMassStrength(part, cs.part);
             };
 
             // Auto-attach at the wing's trailing-edge mid-span with the calibrated pose;
