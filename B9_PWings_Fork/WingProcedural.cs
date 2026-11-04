@@ -1003,6 +1003,35 @@ namespace WingProcedural
             catch (Exception e) { Debug.LogWarning("[B9PW] CopyColoursBySection failed: " + e); }
         }
 
+        // Bisect: carry the source surface's own settings onto the new piece - FAR's
+        // mass-strength multiplier, the control axes, deflection, deploy and authority
+        // settings, B9 materials, and so on - by copying every persistent field of every
+        // module. Runs before the new part starts, as a craft load would set them. The
+        // caller sets the piece's geometry afterwards. isAttached and isSetToDefaultValues
+        // describe the new part's own state, not a setting, so they are left alone.
+        private static void CopyPartSettings(Part src, Part dst)
+        {
+            for (int i = 0; i < src.Modules.Count && i < dst.Modules.Count; i++)
+            {
+                PartModule s = src.Modules[i];
+                PartModule d = dst.Modules[i];
+                if (s.moduleName != d.moduleName)
+                    continue;
+                foreach (BaseField f in s.Fields)
+                {
+                    if (!f.isPersistant)
+                        continue;
+                    if (s is WingProcedural && (f.name == nameof(isAttached) || f.name == nameof(isSetToDefaultValues)))
+                        continue;
+                    BaseField df = d.Fields[f.name];
+                    if (df == null)
+                        continue;
+                    try { df.SetValue(f.GetValue(s), d); }
+                    catch (Exception e) { Debug.LogWarning("[B9PW] CopyPartSettings: " + s.moduleName + "." + f.name + ": " + e.Message); }
+                }
+            }
+        }
+
         // Link parts as a mirror-symmetry group so the editor moves/deletes them together
         // instead of duplicating on edit.
         private static void LinkSymmetry(List<Part> parts, SymmetryMethod method)
@@ -1712,6 +1741,8 @@ namespace WingProcedural
             // counterpart's side and colours, not this control's.
             Func<WingProcedural, Action<WingProcedural>> cfgFor = src => cs =>
             {
+                // Everything but the geometry stays as the source had it.
+                CopyPartSettings(src.part, cs.part);
                 cs.sharedBaseLength = (1f - f) * L;
                 cs.sharedBaseWidthRoot = cutWidth;
                 cs.sharedBaseWidthTip = tipWidth;
