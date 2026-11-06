@@ -692,7 +692,7 @@ namespace WingProcedural
             float offset = sharedBaseLength / parent.sharedBaseLength * parent.sharedBaseOffsetTip;
             sharedBaseWidthTip = tip;
             sharedBaseOffsetTip = offset;
-            sharedBaseThicknessTip = Mathf.Min(sharedBaseThicknessRoot + (float)(sharedBaseLength / parent.sharedBaseLength) * (float)(parent.sharedBaseThicknessTip - parent.sharedBaseThicknessRoot), 0); //use mathf.Min instead of define the function min
+            sharedBaseThicknessTip = Mathf.Max(sharedBaseThicknessRoot + (float)(sharedBaseLength / parent.sharedBaseLength) * (float)(parent.sharedBaseThicknessTip - parent.sharedBaseThicknessRoot), sharedBaseThicknessLimits.x);
         }
 
         private void InheritBase(WingProcedural parent)
