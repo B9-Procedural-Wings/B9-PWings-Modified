@@ -675,6 +675,13 @@ namespace WingProcedural
                     InheritCtrlOffset(parentModule, back);
                     break;
             }
+
+            // A linked segment's root chord is wherever the parent's tip chord lies in its
+            // frame - not the unjoined-piece guess InheritBase makes for the root offset.
+            if ((mode == 0 || mode == 1) && SegLinkedParent() == parentModule)
+                SegRootChordFromParentTip(parentModule.part.transform, parentModule.SegCurrentShape());
+
+            SegAcceptRoot();
         }
 
         private void InheritShape(WingProcedural parent)
@@ -1962,6 +1969,1188 @@ namespace WingProcedural
 
         #endregion Bisect control surface
 
+        #region Linked wing segments
+
+        // A wing built from several procedural segments, each attached to the previous one's
+        // tip, edits as one shape: the joint between two segments is shared. Moving a segment's
+        // tip (length or tip offset - the green handle, the G deform, the sliders) carries the
+        // next segment along whole, and everything outboard of it. With KSP's Mod key (Alt) held,
+        // or for any other tip change (width, thickness, edge widths), the next segment's root
+        // moves onto the new tip while its own tip stays where it is: it is reshaped, and the
+        // segments further along stay put. Changing a segment's root reshapes the previous
+        // segment's tip to match.
+        //
+        // A segment is linked to its parent wing by "Join to parent wing" in the J window, and
+        // stays linked until "Unlink from parent wing", or until it is picked up or ends up with
+        // a different parent (re-root). Craft saved before links were stored have them detected
+        // once, on load, from where the segments sit.
+        //
+        // Linked segments may meet at an angle (dihedral/anhedral about the shared chord); both
+        // joint faces are then mitered onto the plane halfway between them so they meet without
+        // a gap. The same goes for a mirror pair meeting root to root on the symmetry plane.
+        //
+        // Part-local frame, as used by the handles: X = span (root 0, tip +length), Y = chord
+        // (+Y toward the leading edge), Z = thickness. Root chord center (0, offR), tip chord
+        // center (length, -offT).
+
+        private struct SegShape
+        {
+            public float len, wR, wT, offR, offT, thR, thT, leR, leT, teR, teT;
+        }
+
+        [KSPField(isPersistant = true)]
+        public bool segLinkedToParent = false;
+
+        // The parent the link was made to; a different parent (picked up, re-rooted) ends it.
+        // Runtime only - taken from the hierarchy on the first editor frame after a load.
+        private Part segLinkParent;
+        // Loaded from a craft saved before links were stored: detect the link once.
+        private bool segLinkLegacy = false;
+
+        private SegShape segLast;
+        private bool segInit = false;
+        private bool segLinkedLastFrame;
+
+        // An edit gesture (mouse held, handle dragged, deform key held) gets a serial number. A
+        // segment refitted during a gesture keeps the tip position and orientation it had when
+        // the gesture began and fits against those every frame, instead of against last frame's
+        // result - so collapsing it (dragging the joint past its tip) and dragging back within
+        // the same gesture restores it exactly.
+        private static int segGestureSerial = 0;
+        private static int segGestureTickFrame = -1;
+        private static int segDeformFrame = -1;
+        private static bool segGestureActive = false;
+        private static int segGestureEndFrame = -1;
+        private static int segGestureInputFrame = -1;
+        private int segFixedSerial = -1;
+        private Vector3 segFixedTip;
+        private Quaternion segFixedRot;
+        private readonly List<Part> segFixedPinned = new List<Part>();
+        // Where the first segment linked at the tip sat along the span, from the tip, when the
+        // tip was fixed (a loaded craft's pieces can sit a little off), and the gesture in which
+        // the tip last could not stay fixed (see the end of SegFitRootToParentTip).
+        private float segFixedChildOffset;
+        private int segTipShiftSerial = -2;
+
+        // Shorter than this, what is left of a segment's span says nothing about which way it
+        // should point, so it keeps its orientation rather than turning to follow its tip.
+        private const float segMinTurnSpan = 0.05f;
+
+        // Chords closer to parallel than this (cosine, about 2.5 deg) are taken for parallel: the
+        // joint math assumes they are, and a piece twisted further off its parent's chord (yawed
+        // or pitched with the rotate tool) does not continue it. Join squares a piece up exactly.
+        private const float segChordParallelDot = 0.999f;
+
+        // Two segments whose spans are closer to opposite than this (cosine of the angle between
+        // them) are folded back flat, one lying on the other: no joint. Any other angle about the
+        // shared chord is a joint, winglets included.
+        private const float segFoldedBackDot = -0.996f;
+
+        // Joints at more than a right angle are left square (cosine of the joint angle below
+        // this): the miter would shear the faces along the span by more than the segment is
+        // thick (tan of half the angle), without bound toward a fold.
+        private const float segMiterMinDot = -1e-4f;
+
+        // Joint upkeep (control/trailing-edge matching, miters) has work to do only while
+        // something changes: a gesture, an editor part event, a field change on any wing, a part
+        // just started. It runs for a few frames after the last of those, not on every wing every
+        // frame.
+        private static int segBusyFrame = -1;
+        private const int segSettleFrames = 10;
+        private static void SegMarkBusy() => segBusyFrame = Time.frameCount;
+        private static bool SegBusy => Time.frameCount - segBusyFrame <= segSettleFrames;
+
+        // A miter change reshapes only the joint faces. The aero (FAR's voxels, drag cubes) is
+        // updated for it once the gesture moving the joint is over, not on every frame of it.
+        private bool segMiterAeroPending;
+
+        // Joint face slopes, in the mesh frame: a root/tip vertex moves along the span by this
+        // much per unit of thickness. Persisted so flight builds the same mesh the editor did.
+        [KSPField(isPersistant = true)]
+        public float segMiterRoot = 0f;
+
+        [KSPField(isPersistant = true)]
+        public float segMiterTip = 0f;
+
+        private float segMiterRootCached, segMiterTipCached;
+
+        // Read once per frame: every segment asks several times a frame.
+        private static int segLinkEnabledFrame = -1;
+        private static bool segLinkEnabledCached;
+        private static bool SegLinkEnabled
+        {
+            get
+            {
+                if (segLinkEnabledFrame != Time.frameCount)
+                {
+                    segLinkEnabledFrame = Time.frameCount;
+                    bool enabled = HighLogic.CurrentGame.Parameters.CustomParams<WPSensitivity>().linkSegments;
+                    // Switched in the settings: no part event or field change says so, but every
+                    // joint's miters change.
+                    if (enabled != segLinkEnabledCached)
+                        SegMarkBusy();
+                    segLinkEnabledCached = enabled;
+                }
+                return segLinkEnabledCached;
+            }
+        }
+
+        private SegShape SegCurrentShape()
+        {
+            return new SegShape
+            {
+                len = sharedBaseLength,
+                wR = sharedBaseWidthRoot,
+                wT = sharedBaseWidthTip,
+                offR = sharedBaseOffsetRoot,
+                offT = sharedBaseOffsetTip,
+                thR = sharedBaseThicknessRoot,
+                thT = sharedBaseThicknessTip,
+                leR = sharedEdgeWidthLeadingRoot,
+                leT = sharedEdgeWidthLeadingTip,
+                teR = sharedEdgeWidthTrailingRoot,
+                teT = sharedEdgeWidthTrailingTip
+            };
+        }
+
+        // A change smaller than this (m) is float noise, not an edit: the two sides of a mirror
+        // pair are refit in their own frames and come out a few ulps apart, and the symmetry sync
+        // then copies one side's values over the other's.
+        private const float segEditEpsilon = 1e-4f;
+
+        private static bool SegDiffers(float a, float b) => Mathf.Abs(a - b) > segEditEpsilon;
+
+        private static bool SegTipChanged(SegShape a, SegShape b)
+        {
+            return SegDiffers(a.len, b.len) || SegDiffers(a.wT, b.wT) || SegDiffers(a.offT, b.offT)
+                || SegDiffers(a.thT, b.thT) || SegDiffers(a.leT, b.leT) || SegDiffers(a.teT, b.teT);
+        }
+
+        private static bool SegRootChanged(SegShape a, SegShape b)
+        {
+            return SegDiffers(a.wR, b.wR) || SegDiffers(a.offR, b.offR)
+                || SegDiffers(a.thR, b.thR) || SegDiffers(a.leR, b.leR) || SegDiffers(a.teR, b.teR);
+        }
+
+        /// <summary>The wing module of a part that can take part in a segment chain, or null.</summary>
+        private static WingProcedural SegModule(Part p)
+        {
+            if (p == null)
+                return null;
+            WingProcedural w = p.Modules.GetModule<WingProcedural>();
+            if (w == null || w.isCtrlSrf || w.isWingAsCtrlSrf)
+                return null;
+            // B9 marks a wing attached when it is attached to something; the craft's root part
+            // never is, but can still start a chain.
+            return w.isAttached || (EditorLogic.fetch != null && EditorLogic.RootPart == p) ? w : null;
+        }
+
+        /// <summary>This segment's parent segment, if it is linked to it; otherwise null.</summary>
+        private WingProcedural SegLinkedParent()
+        {
+            if (!segLinkedToParent || SegModule(part) == null)
+                return null;
+            return SegModule(part.parent);
+        }
+
+        /// <summary>The child of <paramref name="w"/> as a segment linked to it, or null.</summary>
+        private static WingProcedural SegLinkedChild(WingProcedural w, Part child)
+        {
+            WingProcedural c = SegModule(child);
+            return c != null && c.segLinkedToParent && child.parent == w.part ? c : null;
+        }
+
+        /// <summary>
+        /// Whether <paramref name="child"/> sits where a segment continuing from the tip of
+        /// <paramref name="parent"/> would: origin on the tip chord, chords parallel, at any angle
+        /// about that chord short of folding back flat. Used to join legacy craft on load and to
+        /// tell whether a moved segment is still on the tip; links are stored after that.
+        /// </summary>
+        private static bool SegIsJoinedAtTip(Part parent, SegShape s, Part child)
+        {
+            Transform pt = parent.transform, ct = child.transform;
+
+            if (Vector3.Dot(ct.up, pt.up) < segChordParallelDot || Vector3.Dot(ct.right, pt.right) < segFoldedBackDot)
+                return false;
+
+            Vector3 o = pt.InverseTransformPoint(ct.position);
+            float tol = Mathf.Max(0.05f, 0.02f * s.wT);
+            if (Mathf.Abs(o.x - s.len) > tol)
+                return false;
+            if (Mathf.Abs(o.z) > 0.5f * s.thT + tol)
+                return false;
+
+            float y = o.y + s.offT;
+            return y <= 0.5f * s.wT + s.leT + tol && y >= -0.5f * s.wT - s.teT - tol;
+        }
+
+        /// <summary>
+        /// Keep the stored link honest: detect it once for a legacy craft, and end it when this
+        /// segment's parent is no longer the one it was linked to.
+        /// </summary>
+        private void SegLinkStateUpdate()
+        {
+            if (part.parent == null)
+            {
+                // The craft's root (re-rooted onto this piece, or loaded as the root) has no
+                // parent to be linked to.
+                if (EditorLogic.fetch != null && EditorLogic.RootPart == part)
+                {
+                    segLinkedToParent = false;
+                    segLinkParent = null;
+                    // nothing to detect for a legacy craft's root either
+                    segLinkLegacy = false;
+                }
+                return;
+            }
+            if (!isAttached)
+                return;
+
+            if (segLinkLegacy)
+            {
+                // Linked if it sits on its parent's tip - the first-frame check below decides.
+                segLinkLegacy = false;
+                segLinkedToParent = true;
+                segLinkParent = null;
+            }
+
+            if (!segLinkedToParent)
+            {
+                segLinkParent = null;
+                return;
+            }
+            if (segLinkParent == null)
+            {
+                // First frame after a load - or a copy or subassembly just placed, which
+                // carries the saved flag but was never joined to this parent. Keep the link
+                // only if the piece really sits on its parent's tip.
+                WingProcedural p = SegModule(part.parent);
+                if (p != null && SegModule(part) != null && SegIsJoinedAtTip(p.part, p.SegCurrentShape(), part))
+                    segLinkParent = part.parent;
+                else
+                    segLinkedToParent = false;
+            }
+            else if (part.parent != segLinkParent)
+            {
+                segLinkedToParent = false;
+                segLinkParent = null;
+            }
+        }
+
+        /// <summary>
+        /// Picking the segment up ends its link, and its symmetry counterparts' (picked up with
+        /// it) - not its children's, which come along.
+        /// </summary>
+        private void SegOnEditorDetach()
+        {
+            Part held = EditorLogic.SelectedPart;
+            if (held != null && (held == part || part.symmetryCounterparts.Contains(held)))
+            {
+                segLinkedToParent = false;
+                segLinkParent = null;
+            }
+        }
+
+        /// <summary>
+        /// Moved with the offset or rotate tool (this part or, through symmetry, its twin): a
+        /// segment moved off its parent's tip is no longer linked. Turning it about the joint -
+        /// how dihedral is set - keeps it on the tip and linked.
+        /// </summary>
+        private void SegOnEditorPartEvent(ConstructionEventType type, Part p)
+        {
+            SegMarkBusy();
+            if (type != ConstructionEventType.PartOffset && type != ConstructionEventType.PartRotated)
+                return;
+            if (!segLinkedToParent || p == null || (p != part && !part.symmetryCounterparts.Contains(p)))
+                return;
+            WingProcedural parent = SegModule(part.parent);
+            if (parent == null || !SegIsJoinedAtTip(parent.part, parent.SegCurrentShape(), part))
+            {
+                segLinkedToParent = false;
+                segLinkParent = null;
+            }
+        }
+
+        private void SegGestureTick()
+        {
+            int frame = Time.frameCount;
+            if (state != 0)
+                segDeformFrame = frame;
+            if (segGestureTickFrame == frame)
+                return;
+            segGestureTickFrame = frame;
+            // Read every frame, so the setting being switched is noticed (see SegLinkEnabled).
+            _ = SegLinkEnabled;
+            // A gesture lasts a frame past its input: the handles move the fields after this
+            // runs, so the last of a drag is carried across the frame after the handle lets go,
+            // and must still be fit against the gesture's fixed tips.
+            if (Input.GetMouseButton(0) || EditorHandle.AnyHandleDragging)
+                segGestureInputFrame = frame;
+            bool active = frame - segGestureInputFrame <= 1 || frame - segDeformFrame <= 1;
+            if (active && !segGestureActive)
+                ++segGestureSerial;
+            if (!active && segGestureActive)
+                segGestureEndFrame = frame;
+            segGestureActive = active;
+            if (active)
+                SegMarkBusy();
+        }
+
+        /// <summary>
+        /// Runs on the segment being edited: if its root or tip changed since last frame, carry
+        /// the change across each linked joint, for this part and for its symmetry counterparts
+        /// (which get the same field values from UpdateCounterparts, but whose neighbors need
+        /// moving in their own frames). Every other segment just records its shape, so a change
+        /// that arrives from a neighbor or a counterpart is never pushed on again.
+        /// </summary>
+        private void SegLinkUpdate()
+        {
+            SegGestureTick();
+            SegLinkStateUpdate();
+            // A link made or ended (the J window's button, a pickup, a re-root) changes the joint's
+            // miters with no field change or part event to say so.
+            if (!segInit || segLinkedToParent != segLinkedLastFrame)
+                SegMarkBusy();
+            segLinkedLastFrame = segLinkedToParent;
+            SegShape now = SegCurrentShape();
+            bool editing = part.GetInstanceID() == uiInstanceIDTarget || state != 0;
+
+            if (segInit && editing && SegLinkEnabled && SegModule(part) != null)
+            {
+                bool tip = SegTipChanged(segLast, now);
+                bool root = SegRootChanged(segLast, now);
+                if (tip || root)
+                {
+                    SegApply(this, segLast, now, tip, root);
+                    foreach (Part sym in part.symmetryCounterparts)
+                    {
+                        WingProcedural w = SegModule(sym);
+                        if (w != null)
+                            SegApply(w, segLast, now, tip, root);
+                    }
+                    // Carrying the edit across can refit this segment too (a neighbor at its
+                    // size limit). Already carried across for the counterparts: when the values
+                    // reach them (UpdateCounterparts) they are not a new edit, even if one still
+                    // looks like an edit target (stale J-window target).
+                    now = SegCurrentShape();
+                    foreach (Part sym in part.symmetryCounterparts)
+                    {
+                        WingProcedural w = SegModule(sym);
+                        if (w != null)
+                            w.segLast = now;
+                    }
+                }
+            }
+
+            segLast = now;
+            segInit = true;
+        }
+
+        /// <summary>
+        /// Accept the current root as-is without reshaping the parent - for edits that took the
+        /// root FROM the parent (inheritance), where pushing it back would be circular.
+        /// </summary>
+        private void SegAcceptRoot()
+        {
+            SegShape now = SegCurrentShape();
+            segLast.wR = now.wR;
+            segLast.offR = now.offR;
+            segLast.thR = now.thR;
+            segLast.leR = now.leR;
+            segLast.teR = now.teR;
+        }
+
+        private static void SegApply(WingProcedural w, SegShape before, SegShape after, bool tip, bool root)
+        {
+            if (tip)
+                SegPushTip(w, before, after, null);
+            if (root)
+                SegPushRoot(w, before, after);
+        }
+
+        /// <summary>
+        /// <paramref name="w"/>'s tip went from <paramref name="before"/> to
+        /// <paramref name="after"/>: refit every segment linked to it.
+        /// </summary>
+        private static void SegPushTip(WingProcedural w, SegShape before, SegShape after, Part skip)
+        {
+            // Refitting moves the children; it never adds or removes any.
+            List<Part> children = w.part.children;
+            for (int i = 0; i < children.Count; ++i)
+            {
+                if (children[i] == skip)
+                    continue;
+                WingProcedural seg = SegLinkedChild(w, children[i]);
+                if (seg == null)
+                    continue;
+                if (SegCarriesAlong(before, after))
+                    seg.SegCarryToParentTip(w, before, after);
+                else
+                    seg.SegFitRootToParentTip(w, before, after);
+            }
+        }
+
+        /// <summary>
+        /// Move this segment's root onto its parent's new tip and reshape it so its own tip stays
+        /// where it was. The segment is re-anchored at the same fraction along the parent's tip
+        /// chord it was attached at, so the attach point slides with the chord rather than
+        /// jumping to its middle. If the segment is tilted relative to its parent, the joint
+        /// moving along the parent's span would also move it off its own plane; the segment then
+        /// turns about its chord to keep aiming at its tip, i.e. its dihedral follows the joint.
+        /// </summary>
+        private void SegFitRootToParentTip(WingProcedural parentWing, SegShape before, SegShape after)
+        {
+            Transform pt = parentWing.part.transform, ct = part.transform;
+            SegShape mine = SegCurrentShape();
+
+            // Captured once per gesture (see segFixedSerial): where this segment's tip is, which
+            // way it faces, and which segments are linked at its tip - those must not ride along
+            // when it is re-anchored.
+            if (!segGestureActive || segFixedSerial != segGestureSerial)
+            {
+                segFixedSerial = segGestureActive ? segGestureSerial : -1;
+                segFixedTip = ct.TransformPoint(new Vector3(mine.len, -mine.offT, 0f));
+                segFixedRot = ct.rotation;
+                segFixedPinned.Clear();
+                segFixedChildOffset = 0f;
+                foreach (Part c in part.children)
+                {
+                    if (SegLinkedChild(this, c) == null)
+                        continue;
+                    if (segFixedPinned.Count == 0)
+                        segFixedChildOffset = ct.InverseTransformPoint(c.transform.position).x - mine.len;
+                    segFixedPinned.Add(c);
+                }
+            }
+            Vector3 tipWorld = segFixedTip;
+
+            // Everything else attached here (tanks, pylons, unlinked pieces, controls) keeps its
+            // place relative to the fixed tip rather than riding with the moving origin: it stays
+            // put in the world, turned with the segment if the segment turns. A control surface
+            // ending at the root joint rides with the root instead - it stands in for the
+            // trailing edge there.
+            List<SegKeptPart> kept = segKept;
+            kept.Clear();
+            foreach (Part c in part.children)
+            {
+                if (c == null)
+                    continue;
+                WingProcedural cw = SegTrailingCtrl(c);
+                if (cw != null && SegCtrlEndsAt(this, cw, 0f))
+                    continue;
+                kept.Add(new SegKeptPart { part = c, pos = c.transform.position, rot = c.transform.rotation });
+            }
+            Quaternion oldRot = ct.rotation;
+
+            bool parentCtrl = SegCtrlAtEnd(parentWing, before, true, pt, out _, out _);
+            bool ownCtrl = SegCtrlAtEnd(this, mine, false, ct, out _, out SegCtrlEnd ownEnd);
+
+            Vector3 anchor = SegAnchorOnParentTip(pt, before, after);
+            Quaternion rot = segFixedRot;
+            Vector3 chord = rot * Vector3.up;
+            Vector3 span = Vector3.ProjectOnPlane(tipWorld - anchor, chord);
+            Vector3 baseRight = Vector3.ProjectOnPlane(rot * Vector3.right, chord);
+            if (span.magnitude > segMinTurnSpan && Vector3.Dot(span, baseRight) > 0f)
+            {
+                float angle = Vector3.SignedAngle(baseRight, span, chord);
+                if (Mathf.Abs(angle) > 1e-3f)
+                    rot = Quaternion.AngleAxis(angle, chord) * rot;
+            }
+            ct.SetPositionAndRotation(anchor, rot);
+
+            SegTakeRootFromParentTip(pt, before, after, parentCtrl, ownCtrl, ownEnd);
+
+            // Far end stays put: re-measure the fixed tip from the new origin - unless that is
+            // past the length limit, or the joint has gone past the tip (collapsed to a sliver);
+            // the tip then ends up short of where it was.
+            Vector3 tip = ct.InverseTransformPoint(tipWorld);
+            sharedBaseLength = Mathf.Clamp(tip.x, 0.01f, GetLimitsFromType(sharedBaseLengthLimits).y);
+            sharedBaseOffsetTip = -tip.y;
+
+            SegSetHome(part);
+
+            // Linked segments keep their exact pose (their own tips are fixed); anything else
+            // turns about the fixed tip with this segment.
+            Quaternion turn = rot * Quaternion.Inverse(oldRot);
+            foreach (SegKeptPart k in kept)
+            {
+                Transform t = k.part.transform;
+                if (segFixedPinned.Contains(k.part))
+                    t.SetPositionAndRotation(k.pos, k.rot);
+                else
+                    t.SetPositionAndRotation(tipWorld + turn * (k.pos - tipWorld), turn * k.rot);
+                SegSetHome(k.part);
+            }
+            kept.Clear();
+
+            // A tip that could not stay where it was - or that is coming back after that, in the
+            // same gesture - has moved like an edited tip: the segments linked there follow it
+            // from where they are, keeping the offset from the tip they had when it was fixed.
+            SegShape now = SegCurrentShape();
+            bool shifted = SegDiffers(now.len, tip.x);
+            if (shifted)
+                segTipShiftSerial = segGestureActive ? segGestureSerial : -1;
+            if (shifted || (segGestureActive && segTipShiftSerial == segGestureSerial))
+            {
+                foreach (Part c in part.children)
+                {
+                    if (SegLinkedChild(this, c) == null)
+                        continue;
+                    SegShape from = now, to = now;
+                    from.len = ct.InverseTransformPoint(c.transform.position).x;
+                    to.len = now.len + segFixedChildOffset;
+                    if (SegDiffers(from.len, to.len))
+                        SegPushTip(this, from, to, null);
+                    break;
+                }
+            }
+
+            segLast = now;
+        }
+
+        /// <summary>
+        /// Whether a change of a parent's tip carries the next segment along whole rather than
+        /// refitting it: the tip moved (length or tip offset) at an unchanged width - the green
+        /// handle, the G deform, the length and tip-offset sliders - without KSP's Mod key (Alt by
+        /// default) held, which keeps the next segment's far end where it is instead.
+        /// </summary>
+        private static bool SegCarriesAlong(SegShape before, SegShape after) =>
+            (SegDiffers(before.len, after.len) || SegDiffers(before.offT, after.offT))
+            && !SegDiffers(before.wT, after.wT) && !SegKeepFarEnd;
+
+        // Not inlined: the in-game tests stand in for the key by patching this.
+        private static bool SegKeepFarEnd
+        {
+            [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+            get => GameSettings.MODIFIER_KEY.GetKey();
+        }
+
+        /// <summary>
+        /// Carry this segment along with its parent's moved tip: it moves with the joint, keeping
+        /// its shape, its orientation and everything attached to it - the segments further out too.
+        /// </summary>
+        private void SegCarryToParentTip(WingProcedural parentWing, SegShape before, SegShape after)
+        {
+            Transform pt = parentWing.part.transform, ct = part.transform;
+            // A far-end-fixed refit later in this gesture (Mod key pressed mid-drag) starts from
+            // where the segment has been carried to.
+            segFixedSerial = -1;
+
+            bool parentCtrl = SegCtrlAtEnd(parentWing, before, true, pt, out _, out _);
+            bool ownCtrl = SegCtrlAtEnd(this, SegCurrentShape(), false, ct, out _, out SegCtrlEnd ownEnd);
+
+            ct.position = SegAnchorOnParentTip(pt, before, after);
+            SegTakeRootFromParentTip(pt, before, after, parentCtrl, ownCtrl, ownEnd);
+            SegSetHome(part);
+            segLast = SegCurrentShape();
+        }
+
+        /// <summary>
+        /// Where this segment's origin goes on its parent's new tip chord: at the same fraction
+        /// along the chord it was at on the old one, so the attach point slides with the chord.
+        /// </summary>
+        private Vector3 SegAnchorOnParentTip(Transform pt, SegShape before, SegShape after)
+        {
+            Vector3 o = pt.InverseTransformPoint(part.transform.position);
+            float u = before.wT > 1e-4f ? (o.y + before.offT) / before.wT : 0f;
+            return pt.TransformPoint(new Vector3(after.len, -after.offT + u * after.wT, o.z));
+        }
+
+        /// <summary>
+        /// This segment's root takes its parent's new tip: chord, thickness and edges. A trailing-edge
+        /// control surface at the joint stands in for its side's trailing edge (parentCtrl/ownCtrl,
+        /// looked up on the pre-edit shapes, before the control - which follows its wing a frame
+        /// later - has moved); the parent's trailing-edge change then resizes this side's control.
+        /// </summary>
+        private void SegTakeRootFromParentTip(Transform pt, SegShape before, SegShape after, bool parentCtrl, bool ownCtrl, SegCtrlEnd ownEnd)
+        {
+            SegRootChordFromParentTip(pt, after);
+            sharedBaseThicknessRoot = after.thT;
+            sharedEdgeWidthLeadingRoot = after.leT;
+            if (!parentCtrl && !ownCtrl)
+                sharedEdgeWidthTrailingRoot = after.teT;
+            else if (ownCtrl && !parentCtrl && ownEnd.cs != null && after.teT != before.teT)
+                SegSetCtrlAft(ownEnd, pt, SegTipTeY(after) - after.teT);
+        }
+
+        // Scratch list for SegFitRootToParentTip (runs every frame of a drag; emptied before it
+        // refits anything further out, which uses it again): each part attached to the segment
+        // and where it was.
+        private struct SegKeptPart
+        {
+            public Part part;
+            public Vector3 pos;
+            public Quaternion rot;
+        }
+        private static readonly List<SegKeptPart> segKept = new List<SegKeptPart>();
+
+        /// <summary>
+        /// Make a part's current local pose its attach pose - the editor's home for it, which a
+        /// gizmo reset returns to. The position home is kept apart from any offset the offset
+        /// tool has already applied (attPos), which KSP adds on top of it. The rotation the user
+        /// gave it (attRotation) turns with it, as KSP's rotate gizmo does it: a part picked up is
+        /// held at its attach frame times attRotation, so a stale one would put the part back at
+        /// the dihedral it had before.
+        /// </summary>
+        private static void SegSetHome(Part p)
+        {
+            Transform t = p.transform;
+            Quaternion local = t.localRotation;
+            p.attPos0 = t.localPosition - p.attPos;
+            p.attRotation = p.attRotation * Quaternion.Inverse(p.attRotation0) * local;
+            p.attRotation0 = local;
+        }
+
+        /// <summary>c as a trailing-edge control surface attached to a wing, or null.</summary>
+        private static WingProcedural SegTrailingCtrl(Part c)
+        {
+            WingProcedural cs = c.Modules.GetModule<WingProcedural>();
+            return cs != null && cs.isCtrlSrf && !cs.isWingAsCtrlSrf && cs.isAttached ? cs : null;
+        }
+
+        /// <summary>A control surface's trailing corner at one end, in world space.</summary>
+        private static Vector3 SegCtrlTrailingCorner(WingProcedural cs, bool rootEnd) =>
+            cs.part.transform.TransformPoint(SegCtrlCorner(cs, rootEnd, SegCtrlBodyWidth(cs, rootEnd) + SegCtrlTeWidth(cs, rootEnd)));
+
+        /// <summary>How far off w's root or tip plane a control's end may lie and still end there.</summary>
+        private static float SegCtrlPlaneTol(WingProcedural w) => Mathf.Max(0.05f, 0.01f * w.sharedBaseLength);
+
+        /// <summary>Whether control surface <paramref name="cs"/> has an end at w's span station <paramref name="planeX"/>.</summary>
+        private static bool SegCtrlEndsAt(WingProcedural w, WingProcedural cs, float planeX)
+        {
+            Transform wt = w.part.transform;
+            float tol = SegCtrlPlaneTol(w);
+            return Mathf.Abs(wt.InverseTransformPoint(SegCtrlTrailingCorner(cs, true)).x - planeX) <= tol
+                || Mathf.Abs(wt.InverseTransformPoint(SegCtrlTrailingCorner(cs, false)).x - planeX) <= tol;
+        }
+
+        /// <summary>
+        /// Root chord width and offset from where <paramref name="parentTip"/>'s tip chord lies
+        /// in this part's frame (the parent's part transform <paramref name="pt"/>).
+        /// </summary>
+        private void SegRootChordFromParentTip(Transform pt, SegShape parentTip)
+        {
+            Transform ct = part.transform;
+            Vector3 le = ct.InverseTransformPoint(pt.TransformPoint(new Vector3(parentTip.len, -parentTip.offT + 0.5f * parentTip.wT, 0f)));
+            Vector3 te = ct.InverseTransformPoint(pt.TransformPoint(new Vector3(parentTip.len, -parentTip.offT - 0.5f * parentTip.wT, 0f)));
+            Vector2 limits = GetLimitsFromType(sharedBaseWidthRootLimits);
+            sharedBaseWidthRoot = Mathf.Clamp(le.y - te.y, limits.x, limits.y);
+            sharedBaseOffsetRoot = 0.5f * (le.y + te.y);
+        }
+
+        /// <summary>
+        /// <paramref name="w"/>'s root changed: reshape the tip of the segment it is linked to so
+        /// the two chords still meet, then refit any other segment sharing that tip.
+        /// </summary>
+        private static void SegPushRoot(WingProcedural w, SegShape before, SegShape after)
+        {
+            WingProcedural p = w.SegLinkedParent();
+            if (p == null)
+                return;
+            SegShape pBefore = p.SegCurrentShape();
+
+            Transform pt = p.part.transform, wt = w.part.transform;
+            Vector3 le = pt.InverseTransformPoint(wt.TransformPoint(new Vector3(0f, after.offR + 0.5f * after.wR, 0f)));
+            Vector3 te = pt.InverseTransformPoint(wt.TransformPoint(new Vector3(0f, after.offR - 0.5f * after.wR, 0f)));
+
+            bool parentCtrl = SegCtrlAtEnd(p, pBefore, true, wt, out _, out SegCtrlEnd parentEnd);
+            bool ownCtrl = SegCtrlAtEnd(w, before, false, wt, out _, out _);
+
+            // Within the parent's size limits. At one, its tip falls short of this root, and this
+            // segment is refit onto that tip below like the parent's other linked segments.
+            float len = Mathf.Max(0.5f * (le.x + te.x), 0.01f), width = Mathf.Max(le.y - te.y, 0f);
+            p.sharedBaseLength = Mathf.Min(len, p.GetLimitsFromType(sharedBaseLengthLimits).y);
+            p.sharedBaseWidthTip = Mathf.Min(width, p.GetLimitsFromType(sharedBaseWidthTipLimits).y);
+            bool limited = p.sharedBaseLength != len || p.sharedBaseWidthTip != width;
+            p.sharedBaseOffsetTip = -0.5f * (le.y + te.y);
+            p.sharedBaseThicknessTip = after.thR;
+            p.sharedEdgeWidthLeadingTip = after.leR;
+            if (!parentCtrl && !ownCtrl)
+                p.sharedEdgeWidthTrailingTip = after.teR;
+            else if (parentCtrl && !ownCtrl && parentEnd.cs != null && after.teR != before.teR)
+                SegSetCtrlAft(parentEnd, wt, SegRootTeY(after) - after.teR);
+
+            SegShape pAfter = p.SegCurrentShape();
+            p.segLast = pAfter;
+            SegPushTip(p, pBefore, pAfter, w.part);
+            if (limited)
+                w.SegFitRootToParentTip(p, pBefore, pAfter);
+        }
+
+        // Base trailing edge (chord coordinate, own frame) at a segment's root and tip.
+        private static float SegRootTeY(SegShape s) => s.offR - 0.5f * s.wR;
+        private static float SegTipTeY(SegShape s) => -s.offT - 0.5f * s.wT;
+
+        private struct SegCtrlEnd
+        {
+            public WingProcedural cs;
+            public bool rootEnd;
+        }
+
+        /// <summary>
+        /// A control surface's trailing corner at one end, in its part frame, for a chord depth
+        /// (body width + trailing-edge width) of <paramref name="depth"/>. Same placement as the
+        /// control's trailing handles, including the X flip the handles get on the unmirrored side.
+        /// </summary>
+        private static Vector3 SegCtrlCorner(WingProcedural cs, bool rootEnd, float depth)
+        {
+            float s = cs.isMirrored ? 1f : -1f;
+            float half = 0.5f * cs.sharedBaseLength;
+            return rootEnd
+                ? new Vector3(s * (half - cs.sharedBaseOffsetRoot * depth), -depth, 0f)
+                : new Vector3(s * (-half - cs.sharedBaseOffsetTip * depth), -depth, 0f);
+        }
+
+        private static float SegCtrlBodyWidth(WingProcedural cs, bool rootEnd) =>
+            rootEnd ? cs.sharedBaseWidthRoot : cs.sharedBaseWidthTip;
+
+        private static float SegCtrlTeWidth(WingProcedural cs, bool rootEnd) =>
+            rootEnd ? cs.sharedEdgeWidthTrailingRoot : cs.sharedEdgeWidthTrailingTip;
+
+        /// <summary>
+        /// Whether a trailing-edge control surface on <paramref name="w"/> ends at the plane x =
+        /// <paramref name="planeX"/> of w's frame (its root or tip), and if so which end and how
+        /// far aft it reaches there, as a Y (chord) coordinate in <paramref name="frame"/>. Only a
+        /// control reaching behind w's base trailing edge there (<paramref name="baseTeY"/>, w's
+        /// frame) counts, so a slat on the leading edge is ignored.
+        /// </summary>
+        private static bool SegFindCtrlEnd(WingProcedural w, float planeX, float baseTeY, Transform frame, out float aftY, out SegCtrlEnd end)
+        {
+            aftY = float.PositiveInfinity;
+            end = default(SegCtrlEnd);
+            bool found = false;
+            Transform wt = w.part.transform;
+            float tol = SegCtrlPlaneTol(w);
+            foreach (Part c in w.part.children)
+            {
+                WingProcedural cs = SegTrailingCtrl(c);
+                if (cs == null)
+                    continue;
+                for (int k = 0; k < 2; ++k)
+                {
+                    bool rootEnd = k == 0;
+                    Vector3 corner = SegCtrlTrailingCorner(cs, rootEnd);
+                    Vector3 inWing = wt.InverseTransformPoint(corner);
+                    if (Mathf.Abs(inWing.x - planeX) > tol || inWing.y >= baseTeY - 1e-3f)
+                        continue;
+                    float y = frame.InverseTransformPoint(corner).y;
+                    if (y < aftY)
+                    {
+                        aftY = y;
+                        end = new SegCtrlEnd { cs = cs, rootEnd = rootEnd };
+                        found = true;
+                    }
+                }
+            }
+            return found;
+        }
+
+        // The control last found at a segment's root or tip: on which frame, and for which gesture
+        // (one found between gestures counts for the next).
+        private struct SegCtrlSighting
+        {
+            public WingProcedural cs;
+            public int frame, gesture;
+        }
+        private SegCtrlSighting segCtrlSeenRoot, segCtrlSeenTip;
+
+        // Frames a control may take to catch up with its wing once the wing stops changing. The
+        // last of a handle drag reaches the wing the frame after the drag ends, and its control
+        // the frame after that.
+        private const int segCtrlCatchUpFrames = 3;
+
+        /// <summary>
+        /// Whether a trailing-edge control stands in for w's trailing edge at its tip (or root),
+        /// for w's shape <paramref name="s"/>: one found ending there (end and aftY as
+        /// SegFindCtrlEnd gives them), or, with w's trailing edge zero there, one found there
+        /// a moment ago, or earlier in the gesture going on or just ended, that is still on w
+        /// (end.cs null). A control follows its wing a frame late, so while the wing changes its
+        /// end can be off the joint, not found for a whole drag; taken for a plain joint then, w
+        /// would be given back a trailing edge under its control.
+        /// </summary>
+        private static bool SegCtrlAtEnd(WingProcedural w, SegShape s, bool atTip, Transform frame, out float aftY, out SegCtrlEnd end)
+        {
+            if (SegFindCtrlEnd(w, atTip ? s.len : 0f, atTip ? SegTipTeY(s) : SegRootTeY(s), frame, out aftY, out end))
+            {
+                var seen = new SegCtrlSighting
+                {
+                    cs = end.cs,
+                    frame = Time.frameCount,
+                    gesture = segGestureActive ? segGestureSerial : segGestureSerial + 1
+                };
+                if (atTip)
+                    w.segCtrlSeenTip = seen;
+                else
+                    w.segCtrlSeenRoot = seen;
+                return true;
+            }
+            if ((atTip ? s.teT : s.teR) > segEditEpsilon)
+                return false;
+            // Between gestures a control catches up within a few frames: not found then, it has
+            // left the joint (resized, moved, removed) and the sighting is dropped.
+            int now = Time.frameCount;
+            SegCtrlSighting last = atTip ? w.segCtrlSeenTip : w.segCtrlSeenRoot;
+            bool thisGesture = last.gesture == segGestureSerial
+                && (segGestureActive || now - segGestureEndFrame <= segCtrlCatchUpFrames);
+            if (last.cs != null && last.cs.part.parent == w.part
+                && (now - last.frame <= segCtrlCatchUpFrames || thisGesture))
+                return true;
+            if (atTip)
+                w.segCtrlSeenTip = default(SegCtrlSighting);
+            else
+                w.segCtrlSeenRoot = default(SegCtrlSighting);
+            return false;
+        }
+
+        /// <summary>
+        /// Resize the control's trailing edge at <paramref name="end"/> so its trailing corner
+        /// reaches <paramref name="targetY"/> (chord coordinate in <paramref name="frame"/>).
+        /// </summary>
+        private static void SegSetCtrlAft(SegCtrlEnd end, Transform frame, float targetY)
+        {
+            WingProcedural cs = end.cs;
+            Transform t = cs.part.transform;
+            float body = SegCtrlBodyWidth(cs, end.rootEnd);
+            float y0 = frame.InverseTransformPoint(t.TransformPoint(SegCtrlCorner(cs, end.rootEnd, body))).y;
+            float y1 = frame.InverseTransformPoint(t.TransformPoint(SegCtrlCorner(cs, end.rootEnd, body + 1f))).y;
+            float dy = y1 - y0;
+            if (Mathf.Abs(dy) < 1e-4f)
+                return;
+            float teWidth = Mathf.Max((targetY - y0) / dy, 0f);
+            if (end.rootEnd)
+                cs.sharedEdgeWidthTrailingRoot = teWidth;
+            else
+                cs.sharedEdgeWidthTrailingTip = teWidth;
+        }
+
+        /// <summary>
+        /// A control surface on one side of this segment's root joint stands in for that side's
+        /// trailing edge (a split zeroes the wing's own). The other side's trailing edge then
+        /// reaches back to the control instead of copying a width that is no longer there.
+        /// Editing that trailing edge resizes the control instead (see the fit/push above); this
+        /// keeps the two matched every editor frame otherwise, e.g. when the control is resized
+        /// or follows its wing. A trailing edge with an edit not yet pushed is left alone - on this
+        /// part or a symmetry counterpart: the edited side's value reaches its counterpart (through
+        /// UpdateCounterparts) a frame before the counterpart's control is resized, and pulling the
+        /// counterpart back to its control there would be copied back over the edit.
+        /// </summary>
+        private static bool SegTrailingEditPending(WingProcedural w, bool root)
+        {
+            bool Pending(WingProcedural x) => root
+                ? SegDiffers(x.sharedEdgeWidthTrailingRoot, x.segLast.teR)
+                : SegDiffers(x.sharedEdgeWidthTrailingTip, x.segLast.teT);
+
+            if (Pending(w))
+                return true;
+            foreach (Part sym in w.part.symmetryCounterparts)
+            {
+                WingProcedural c = sym.Modules.GetModule<WingProcedural>();
+                if (c != null && Pending(c))
+                    return true;
+            }
+            return false;
+        }
+
+        private void SegSyncCtrlTrailing()
+        {
+            if (!SegBusy || !SegLinkEnabled)
+                return;
+            WingProcedural p = SegLinkedParent();
+            if (p == null)
+                return;
+            SegShape ps = p.SegCurrentShape();
+            SegShape cs = SegCurrentShape();
+
+            Transform ct = part.transform, pt = p.part.transform;
+            bool parentCtrl = SegCtrlAtEnd(p, ps, true, ct, out float parentAft, out SegCtrlEnd parentEnd);
+            bool ownCtrl = SegCtrlAtEnd(this, cs, false, pt, out float ownAft, out SegCtrlEnd ownEnd);
+
+            // Only a control found at the joint gives a reach to match; one standing in while it
+            // catches up with its wing just blocks the other side from being changed.
+            if (parentCtrl && parentEnd.cs != null && !ownCtrl && !SegTrailingEditPending(this, root: true))
+            {
+                float te = Mathf.Max(SegRootTeY(cs) - parentAft, 0f);
+                if (Mathf.Abs(te - sharedEdgeWidthTrailingRoot) > 1e-3f)
+                {
+                    sharedEdgeWidthTrailingRoot = te;
+                    segLast.teR = te;
+                }
+            }
+            else if (ownCtrl && ownEnd.cs != null && !parentCtrl && !SegTrailingEditPending(p, root: false))
+            {
+                float te = Mathf.Max(SegTipTeY(ps) - ownAft, 0f);
+                if (Mathf.Abs(te - p.sharedEdgeWidthTrailingTip) > 1e-3f)
+                {
+                    p.sharedEdgeWidthTrailingTip = te;
+                    p.segLast.teT = te;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Recompute this segment's joint miters from where its linked neighbors sit now. The
+        /// geometry rebuild fires through CheckAllFieldValues when either changes.
+        /// </summary>
+        private void SegUpdateMiter()
+        {
+            if (!SegBusy)
+                return;
+            float root = 0f, tip = 0f;
+            Transform mesh = meshFilterWingSection != null ? meshFilterWingSection.transform : null;
+            if (mesh != null && SegLinkEnabled && SegModule(part) != null)
+            {
+                // A tip carrying more than one linked segment (a panel carrying on and a winglet,
+                // say) has no one plane to cut to: that joint is left square on every side.
+                Part only = SegOnlyLinkedChild(this);
+                if (only != null)
+                    tip = SegMiterSlope(mesh, part.transform.right, only.transform.right);
+
+                WingProcedural p = SegLinkedParent();
+                if (p != null)
+                {
+                    if (SegOnlyLinkedChild(p) == part)
+                        root = SegMiterSlope(mesh, p.part.transform.right, part.transform.right);
+                }
+                else
+                {
+                    // Mirror twins meeting root to root on the symmetry plane: as if the twin carried
+                    // on into this one, so both roots end on the plane between them.
+                    Part twin = SegRootTwin();
+                    if (twin != null)
+                        root = SegMiterSlope(mesh, -twin.transform.right, part.transform.right);
+                }
+            }
+
+            if (Mathf.Abs(root - segMiterRoot) > 1e-4f)
+                segMiterRoot = root;
+            if (Mathf.Abs(tip - segMiterTip) > 1e-4f)
+                segMiterTip = tip;
+        }
+
+        /// <summary>The one segment linked at w's tip, or null if there are none or several.</summary>
+        private static Part SegOnlyLinkedChild(WingProcedural w)
+        {
+            Part only = null;
+            foreach (Part c in w.part.children)
+            {
+                if (SegLinkedChild(w, c) == null)
+                    continue;
+                if (only != null)
+                    return null;
+                only = c;
+            }
+            return only;
+        }
+
+        /// <summary>Whether either miter changed since this was last asked (the mesh needs rebuilding).</summary>
+        private bool SegMiterChanged()
+        {
+            bool root = CheckFieldValue(segMiterRoot, ref segMiterRootCached);
+            bool tip = CheckFieldValue(segMiterTip, ref segMiterTipCached);
+            return root || tip;
+        }
+
+        /// <summary>
+        /// Whether this frame's geometry rebuild should update the aero too: for a change of shape
+        /// at once, for a miter change once no gesture is moving the joint any more.
+        /// </summary>
+        private bool SegAeroUpdate(bool shapeChanged, bool miterChanged)
+        {
+            if (miterChanged)
+                segMiterAeroPending = true;
+            if (!shapeChanged && (!segMiterAeroPending || segGestureActive))
+                return false;
+            segMiterAeroPending = false;
+            return true;
+        }
+
+        /// <summary>
+        /// This piece's mirror-symmetry twin, if the two meet root to root - root chords on top of
+        /// each other (on the symmetry plane), chords parallel, at a joint angle mitered joints
+        /// can have (see segMiterMinDot) - or null.
+        /// </summary>
+        private Part SegRootTwin()
+        {
+            if (part.symMethod != SymmetryMethod.Mirror || part.symmetryCounterparts.Count != 1)
+                return null;
+            Part twin = part.symmetryCounterparts[0];
+            WingProcedural tw = SegModule(twin);
+            if (tw == null || twin.parent != part.parent)
+                return null;
+            Transform ct = part.transform, tt = twin.transform;
+            // The joint is between the twin's span carried on through the plane (-tt.right) and this one's.
+            if (Vector3.Dot(ct.up, tt.up) < segChordParallelDot || Vector3.Dot(-tt.right, ct.right) < segMiterMinDot)
+                return null;
+            Vector3 mine = ct.TransformPoint(new Vector3(0f, sharedBaseOffsetRoot, 0f));
+            Vector3 its = tt.TransformPoint(new Vector3(0f, tw.sharedBaseOffsetRoot, 0f));
+            float tol = Mathf.Max(0.05f, 0.02f * sharedBaseWidthRoot);
+            return (mine - its).sqrMagnitude <= tol * tol ? twin : null;
+        }
+
+        /// <summary>
+        /// Slope (span per thickness, in <paramref name="mesh"/>'s frame) of the plane halfway
+        /// between two joined segments' span directions - the face both of them end on. Zero (a
+        /// square joint) past a right angle.
+        /// </summary>
+        private static float SegMiterSlope(Transform mesh, Vector3 inboardSpan, Vector3 outboardSpan)
+        {
+            inboardSpan.Normalize();
+            outboardSpan.Normalize();
+            if (Vector3.Dot(inboardSpan, outboardSpan) < segMiterMinDot)
+                return 0f;
+            Vector3 n = mesh.InverseTransformDirection((inboardSpan + outboardSpan).normalized);
+            if (Mathf.Abs(n.x) < 1e-3f)
+                return 0f;
+            float slope = -n.y / n.x;
+            return Mathf.Abs(slope) < 1e-4f ? 0f : slope;
+        }
+
+        /// <summary>
+        /// Shear root and tip vertices along the span in proportion to their thickness offset, so
+        /// the joint faces lie on the miter planes. Mesh frame: x = -span (root 0, tip
+        /// -length), y = thickness. The slopes are measured in the wing-section mesh's frame;
+        /// other meshes may have their span or thickness axis flipped against it (the leading
+        /// edge is the trailing-edge mesh turned over about the span), which flips the slope.
+        /// </summary>
+        private void ApplySegMiter(Vector3[] vp, float geometricLength, Transform mesh)
+        {
+            if (segMiterRoot == 0f && segMiterTip == 0f)
+                return;
+            float sign = 1f;
+            if (mesh != null && meshFilterWingSection != null)
+            {
+                Transform section = meshFilterWingSection.transform;
+                if (Vector3.Dot(mesh.right, section.right) < 0f)
+                    sign = -sign;
+                if (Vector3.Dot(mesh.up, section.up) < 0f)
+                    sign = -sign;
+            }
+            for (int i = 0; i < vp.Length; ++i)
+            {
+                float t = geometricLength > 1e-5f ? Mathf.Clamp01(-vp[i].x / geometricLength) : 0f;
+                vp[i].x += sign * vp[i].y * Mathf.Lerp(segMiterRoot, segMiterTip, t);
+            }
+        }
+
+        /// <summary>
+        /// J-window link toggle. Joining makes this piece the next segment of the wing it is
+        /// attached to - root on the parent's tip chord, chord parallel to the parent's (keeping
+        /// whatever dihedral the piece has), root dimensions and edges taken from the parent's
+        /// tip - and links it. Unlinking just ends the link. Symmetry counterparts follow.
+        /// </summary>
+        private void SegToggleLink()
+        {
+            bool join = !segLinkedToParent;
+            SegSetLink(join);
+            if (segLinkedToParent != join)
+                return; // nothing to join to
+            foreach (Part sym in part.symmetryCounterparts)
+            {
+                WingProcedural w = sym.Modules.GetModule<WingProcedural>();
+                if (w != null)
+                    w.SegSetLink(join);
+            }
+
+            // One undo step, once the parts have settled (see Undo step after an edit).
+            UndoMarkEdit();
+        }
+
+        /// <summary>Whether the J window offers Join (attached to a wing) or Unlink (linked).</summary>
+        private bool SegCanToggleLink =>
+            !isCtrlSrf && !isWingAsCtrlSrf && (segLinkedToParent || (SegModule(part) != null && SegModule(part.parent) != null));
+
+        private void SegSetLink(bool join)
+        {
+            if (!join)
+            {
+                segLinkedToParent = false;
+                segLinkParent = null;
+                return;
+            }
+
+            if (isCtrlSrf || isWingAsCtrlSrf)
+                return;
+            WingProcedural p = SegModule(part.parent);
+            if (p == null)
+                return;
+            Transform pt = p.part.transform, ct = part.transform;
+
+            Vector3 up = pt.up;
+            Vector3 right = Vector3.ProjectOnPlane(ct.right, up);
+            if (right.sqrMagnitude < 1e-6f)
+                right = pt.right;
+            else if (Vector3.Dot(right.normalized, pt.right) < segFoldedBackDot)
+                return; // points straight back inboard (e.g. the parent's other side): no tip to carry on from
+            right.Normalize();
+            ct.rotation = Quaternion.LookRotation(Vector3.Cross(right, up), up);
+            ct.position = pt.TransformPoint(new Vector3(p.sharedBaseLength, -p.sharedBaseOffsetTip, 0f));
+            SegSetHome(part);
+
+            InheritBase(p);
+            SegRootChordFromParentTip(pt, p.SegCurrentShape());
+
+            segLinkedToParent = true;
+            segLinkParent = part.parent;
+
+            // The root came from the parent; nothing to push back.
+            segLast = SegCurrentShape();
+        }
+
+        #endregion Linked wing segments
+
+        #region Undo step after an edit
+
+        // Shape and color edits (handles, sliders, the deform keys) never reached the editor's
+        // undo stack: they were folded into whatever undo step came next, so undoing that also
+        // undid them. Any frame where a field of the part being edited changes - the fields
+        // CheckAllFieldValues watches to rebuild the geometry, so a field added there is covered -
+        // marks an edit pending; one step is pushed once the edit is over - mouse up, nothing
+        // dragging or deforming, and a few quiet frames so linked segments and symmetry
+        // counterparts have caught up.
+        //
+        // The pending flag is static because the part that was edited may not be the one that
+        // notices the edit is over (and after an undo every part is a new instance).
+        private static bool undoPending;
+        private static int undoEditFrame = -1;
+        private static int undoGestureFrame = -1;
+        private const int undoQuietFrames = 3;
+        // A part's first check finds its loaded values, not an edit.
+        private bool undoFirstCheckDone;
+
+        private static void UndoMarkEdit()
+        {
+            undoPending = true;
+            undoEditFrame = Time.frameCount;
+        }
+
+        /// <param name="changed">Whether CheckAllFieldValues found a field changed this frame.</param>
+        private void PushUndoAfterEdit(bool changed)
+        {
+            int frame = Time.frameCount;
+            if (state != 0 || EditorHandle.AnyHandleDragging)
+                undoGestureFrame = frame;
+
+            bool editing = part.GetInstanceID() == uiInstanceIDTarget || state != 0;
+            if (changed && undoFirstCheckDone && isAttached && editing)
+                UndoMarkEdit();
+            undoFirstCheckDone = true;
+
+            // Not while a part is held: the ship saved for the step would be missing it.
+            if (!undoPending || Input.GetMouseButton(0) || EditorLogic.SelectedPart != null
+                || frame - undoGestureFrame < undoQuietFrames || frame - undoEditFrame < undoQuietFrames)
+                return;
+
+            undoPending = false;
+            if (EditorLogic.fetch != null)
+            {
+                EditorLogic.fetch.SetBackup();
+                if (HighLogic.CurrentGame.Parameters.CustomParams<WPDebug>().logEvents)
+                    Debug.Log("[B9PW] Undo step after wing edit");
+            }
+        }
+
+        #endregion Undo step after an edit
+
         #region Mod detection
 
         public static bool assembliesChecked = false;
@@ -2100,6 +3289,11 @@ namespace WingProcedural
             {
                 node.RemoveValues("mirrorTexturing");
                 node.AddValue("mirrorTexturing", isMirrored);
+                // Saved before a legacy craft's links were detected (the editor's first undo step is taken on load,
+                // before the first update): leave the link out, so restoring this state detects it again rather than
+                // reading every segment as unlinked.
+                if (segLinkLegacy)
+                    node.RemoveValues("segLinkedToParent");
                 if (HighLogic.CurrentGame.Parameters.CustomParams<WPDebug>().logEvents)
                 {
                     DebugLogWithID("OnSave", "Invoked");
@@ -2121,6 +3315,7 @@ namespace WingProcedural
         public override void OnLoad(ConfigNode node)
         {
             node.TryGetValue("mirrorTexturing", ref isMirrored);
+            segLinkLegacy = node.HasValue("sharedBaseLength") && !node.HasValue("segLinkedToParent");
 
             if (HighLogic.LoadedScene != GameScenes.LOADING && HighLogic.CurrentGame.Parameters.CustomParams<WPDebug>().logEvents)
             {
@@ -2342,15 +3537,25 @@ namespace WingProcedural
             FollowParentWing();
 
             DeformWing();
+            SegLinkUpdate();
+            SegSyncCtrlTrailing();
+            SegUpdateMiter();
             CheckAllFieldValues(out bool updateGeo, out bool updateAero);
+            bool updateMiter = SegMiterChanged();
+            bool aero = SegAeroUpdate(updateAero, updateMiter);
 
             if (part.GetInstanceID() == uiInstanceIDTarget)
                 UpdateHandleGizmos();
 
-            if (updateGeo)
+            PushUndoAfterEdit(updateGeo);
+
+            if (updateGeo || updateMiter || aero)
             {
-                UpdateGeometry(updateAero);
-                UpdateCounterparts();
+                SegMarkBusy();
+                UpdateGeometry(aero);
+                // The miters are each counterpart's own (measured in its own frame).
+                if (updateGeo)
+                    UpdateCounterparts();
             }
         }
 
@@ -2387,6 +3592,8 @@ namespace WingProcedural
 
         public void UpdateOnEditorDetach()
         {
+            SegOnEditorDetach();
+
             if (part.parent != null && part.parent.Modules.Contains<WingProcedural>())
             {
                 WingProcedural parentModule = FirstOfTypeOrDefault<WingProcedural>(part.parent.Modules);
@@ -2407,6 +3614,7 @@ namespace WingProcedural
         /// </summary>
         public void OnEditorPartEvent(ConstructionEventType type, Part p)
         {
+            SegOnEditorPartEvent(type, p);
             if (isWingAsCtrlSrf)
             {
                 if (type == ConstructionEventType.PartCopied || type == ConstructionEventType.PartPicked || type == ConstructionEventType.PartCreated || type == ConstructionEventType.PartDetached)
@@ -2600,6 +3808,7 @@ namespace WingProcedural
                         }
                     }
 
+                    ApplySegMiter(vp, geometricLength, meshFilterWingSection.transform);
                     meshFilterWingSection.mesh.vertices = vp;
                     meshFilterWingSection.mesh.uv = uv;
                     meshFilterWingSection.mesh.RecalculateBounds();
@@ -2686,6 +3895,7 @@ namespace WingProcedural
                         }
                     }
 
+                    ApplySegMiter(vp, geometricLength, meshFilterWingSurface.transform);
                     meshFilterWingSurface.mesh.vertices = vp;
                     meshFilterWingSurface.mesh.uv = uv;
                     meshFilterWingSurface.mesh.uv2 = uv2;
@@ -2783,6 +3993,7 @@ namespace WingProcedural
                             }
                         }
 
+                        ApplySegMiter(vp, geometricLength, meshFiltersWingEdgeTrailing[j].transform);
                         meshFiltersWingEdgeTrailing[j].mesh.vertices = vp;
                         meshFiltersWingEdgeTrailing[j].mesh.uv = uv;
                         meshFiltersWingEdgeTrailing[j].mesh.uv2 = uv2;
@@ -2841,6 +4052,7 @@ namespace WingProcedural
                             }
                         }
 
+                        ApplySegMiter(vp, geometricLength, meshFiltersWingEdgeLeading[j].transform);
                         meshFiltersWingEdgeLeading[j].mesh.vertices = vp;
                         meshFiltersWingEdgeLeading[j].mesh.uv = uv;
                         meshFiltersWingEdgeLeading[j].mesh.uv2 = uv2;
@@ -4637,6 +5849,12 @@ namespace WingProcedural
                     }
 
                     GUILayout.EndHorizontal();
+
+                    if (SegCanToggleLink
+                        && GUILayout.Button(segLinkedToParent ? "Unlink from parent wing" : "Join to parent wing", UIUtility.uiStyleButton))
+                    {
+                        SegToggleLink();
+                    }
                     if (isCtrlSrf)
                     {
                         GUILayout.BeginHorizontal();

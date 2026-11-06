@@ -75,6 +75,11 @@ namespace WingProcedural
             )]
         public double mouseSensitivity = 4.0f;
 
+        [GameParameters.CustomParameterUI("Link adjacent wing segments",
+            toolTip = "Editing a wing's tip or root also reshapes the wing segment joined to it, so multi-segment wings stay connected"
+            )]
+        public bool linkSegments = true;
+
 
     }
 }
